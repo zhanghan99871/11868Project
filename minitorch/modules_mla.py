@@ -17,7 +17,7 @@ from .autodiff import Context
 from .cuda_kernel_ops import CudaKernelOps
 from .module import Module, Parameter
 from .modules_basic import Dropout, Embedding, LayerNorm1d, Linear
-from .nn import GELU
+from .nn import GELU, softmax
 from .tensor import Tensor
 from .tensor_functions import Function, ones, tensor_from_numpy, zeros
 from .tensor_ops import TensorBackend
@@ -74,6 +74,25 @@ class _ConcatTime(Function):
         arr = grad.to_numpy()
         return (_from_array(arr[:, :offset, :], backend),
                 _from_array(arr[:, offset:, :], backend))
+
+
+class _RepeatHeads(Function):
+    """Expand [B,K,D] to [B,H,K,D]; backward sums over the head axis."""
+
+    @staticmethod
+    def forward(ctx: Context, x: Tensor, n_heads: Tensor) -> Tensor:
+        if len(x.shape) != 3:
+            raise ValueError("shared rotary keys must have shape [B,K,D]")
+        h = int(n_heads.item())
+        if h <= 0:
+            raise ValueError("n_heads must be positive")
+        ctx.save_for_backward(x.backend)
+        return _from_array(np.repeat(x.to_numpy()[:, None, :, :], h, axis=1), x.backend)
+
+    @staticmethod
+    def backward(ctx: Context, grad: Tensor):
+        (backend,) = ctx.saved_values
+        return _from_array(grad.to_numpy().sum(axis=1), backend), 0.0
 
 
 class _RoPE(Function):
@@ -192,10 +211,13 @@ class RMSNorm(Module):
 
 
 class MLAAttention(Module):
-    def __init__(self, cfg: MLAConfig, backend: TensorBackend):
+    def __init__(self, cfg: MLAConfig, backend: TensorBackend,
+                 use_fused_kernel: bool = True):
         super().__init__()
         self.cfg = cfg
         self.backend = backend
+        self.use_fused_kernel = use_fused_kernel
+        self.attn_dropout = Dropout(cfg.p_dropout)
         h, dn, dr, dv = (cfg.n_head, cfg.qk_nope_head_dim,
                          cfg.qk_rope_head_dim, cfg.v_head_dim)
         q_out = h * (dn + dr)
@@ -222,8 +244,8 @@ class MLAAttention(Module):
         k_len = past_len + q_len
         if k_len > self.cfg.n_positions:
             raise ValueError("sequence exceeds n_positions")
-        if self.training and self.cfg.p_dropout:
-            raise ValueError("fused MLA does not implement attention-probability dropout; set p_dropout=0")
+        if self.use_fused_kernel and self.training and self.cfg.p_dropout:
+            raise ValueError("fused MLA does not implement attention-probability dropout; set p_dropout=0 or use_fused_kernel=False")
 
         flat = x.contiguous().view(b * q_len, emb)
         if self.cfg.q_lora_rank is None:
@@ -252,16 +274,39 @@ class MLAAttention(Module):
             kr = _ConcatTime.apply(old_kr, kr)
         present = (ck, kr) if use_cache else None
 
-        # MiniTorch Linear stores weights [in_features,out_features]; CUDA
-        # MLA expects W_up [out_features,in_features]. The transpose is
-        # differentiable, so gradients reach kv_up.weights.
-        w_up = self.kv_up.weights.value.permute(1, 0).contiguous()
-        if self.kv_up.bias is None:
-            b_up = zeros((h * (dn + dv),), backend=self.backend)
+        if self.use_fused_kernel:
+            # MiniTorch Linear stores weights [in_features,out_features]; CUDA
+            # MLA expects W_up [out_features,in_features]. Its transpose is
+            # differentiable, so gradients reach kv_up.weights.
+            w_up = self.kv_up.weights.value.permute(1, 0).contiguous()
+            if self.kv_up.bias is None:
+                b_up = zeros((h * (dn + dv),), backend=self.backend)
+            else:
+                b_up = self.kv_up.bias.value
+            context = _MLAFused.apply(qn, qr, ck, kr, w_up, b_up,
+                                      _constant(past_len, self.backend))
         else:
-            b_up = self.kv_up.bias.value
-        context = _MLAFused.apply(qn, qr, ck, kr, w_up, b_up,
-                                  _constant(past_len, self.backend))
+            # Materialize per-head K_nope and V, matching the PyTorch reference.
+            expanded = self.kv_up(ck.contiguous().view(b * k_len, self.cfg.kv_lora_rank))
+            expanded = expanded.contiguous().view(b, k_len, h, dn + dv)
+            expanded = expanded.permute(0, 2, 1, 3).contiguous()
+            kn = _slice_last(expanded, 0, dn)
+            v = _slice_last(expanded, dn, dv)
+            kr_heads = _RepeatHeads.apply(kr, _constant(h, self.backend))
+
+            # This avoids concatenation: QK^T = Q_nope K_nope^T + Q_rope K_rope^T.
+            scores = (qn @ kn.permute(0, 1, 3, 2).contiguous()
+                      + qr @ kr_heads.permute(0, 1, 3, 2).contiguous())
+            scores = scores * ((dn + dr) ** -0.5)
+            # Absolute-position causal mask handles both prefill and KV caching.
+            future = np.arange(k_len)[None, :] > (past_len + np.arange(q_len)[:, None])
+            causal_mask = np.broadcast_to(
+                np.where(future, -np.finfo(np.float32).max, 0.0)[None, None, :, :],
+                (b, h, q_len, k_len),
+            )
+            scores = scores + _from_array(causal_mask, self.backend)
+            probs = self.attn_dropout(softmax(scores, dim=3))
+            context = probs @ v
         context = context.permute(0, 2, 1, 3).contiguous().view(b*q_len, h*dv)
         out = self.out_projection(context).view(b, q_len, emb)
         return self.out_dropout(out), present
@@ -282,11 +327,12 @@ class FeedForward(Module):
 
 class TransformerLayer(Module):
     def __init__(self, cfg: MLAConfig, backend: TensorBackend,
-                 use_fused_layernorm: bool = False):
+                 use_fused_layernorm: bool = False,
+                 use_fused_kernel: bool = True):
         super().__init__()
         self.ln_1 = LayerNorm1d(cfg.n_embd, eps=cfg.ln_eps,
                                 backend=backend, use_fused_kernel=use_fused_layernorm)
-        self.attention = MLAAttention(cfg, backend)
+        self.attention = MLAAttention(cfg, backend, use_fused_kernel=use_fused_kernel)
         self.ln_2 = LayerNorm1d(cfg.n_embd, eps=cfg.ln_eps,
                                 backend=backend, use_fused_kernel=use_fused_layernorm)
         self.ff = FeedForward(cfg, backend)
@@ -303,7 +349,8 @@ class TransformerLayer(Module):
 
 class DecoderLM(Module):
     def __init__(self, cfg: MLAConfig, backend: TensorBackend,
-                 use_fused_layernorm: bool = False):
+                 use_fused_layernorm: bool = False,
+                 use_fused_kernel: bool = True):
         super().__init__()
         self.cfg = cfg
         self.backend = backend
@@ -312,7 +359,9 @@ class DecoderLM(Module):
         self.dropout = Dropout(cfg.p_dropout)
         self.layers: List[TransformerLayer] = []
         for i in range(cfg.n_layer):
-            layer = TransformerLayer(cfg, backend, use_fused_layernorm=use_fused_layernorm)
+            layer = TransformerLayer(cfg, backend,
+                                     use_fused_layernorm=use_fused_layernorm,
+                                     use_fused_kernel=use_fused_kernel)
             setattr(self, f"t_layer_{i + 1}", layer)  # register in MiniTorch Module
             self.layers.append(layer)
         self.ln = LayerNorm1d(cfg.n_embd, eps=cfg.ln_eps,

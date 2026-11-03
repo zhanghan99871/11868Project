@@ -233,7 +233,7 @@ class TransformerLayer(Module):
         
         # COPY FROM ASSIGN3_3
         self.attention = MultiHeadAttention(n_embd, n_head, p_dropout=p_dropout, bias=bias, backend=backend, use_fused_kernel=use_fused_kernel, causal=causal)
-        self.ff = FeedForward(n_embd, p_dropout=p_dropout, bias=bias, backend=backend)
+        self.ff = FeedForward(n_embd, middle_dim=4 * n_embd, p_dropout=p_dropout, bias=bias, backend=backend)
         # raise NotImplementedError
 
         self.use_fused_kernel = use_fused_kernel
@@ -331,7 +331,7 @@ class DecoderLM(Module):
         self.token_embeddings    = Embedding(n_vocab, n_embd, backend=backend)
         self.position_embeddings = Embedding(n_positions, n_embd, backend=backend)
         self.dropout             = Dropout(p_dropout)
-        self.lm_head             = Linear(n_embd, n_vocab, bias=bias, backend=backend) 
+        self.lm_head             = Linear(n_embd, n_vocab, bias=False, backend=backend) 
         # raise NotImplementedError
 
         self.use_fused_kernel = use_fused_kernel

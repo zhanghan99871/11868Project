@@ -17,6 +17,7 @@ from .tensor_ops import MapProto, TensorOps
 from .tensor_functions import tensor_from_numpy
 
 import ctypes
+from pathlib import Path
 import numpy as np
 import pycuda.autoinit
 import pycuda.driver as cuda
@@ -26,6 +27,7 @@ import torch
 lib = ctypes.CDLL("minitorch/cuda_kernels/combine.so")
 lib_softmax = ctypes.CDLL("minitorch/cuda_kernels/softmax_kernel.so")
 lib_layernorm = ctypes.CDLL("minitorch/cuda_kernels/layernorm_kernel.so")
+lib_mla = ctypes.CDLL(str(Path(__file__).resolve().parent / "cuda_kernels" / "mla_kernel.so"))
 datatype = np.float32
 
 # function map
@@ -513,4 +515,98 @@ class CudaKernelOps(TensorOps):
 
       return inp_grad, gamma_grad, beta_grad
       #   END ASSIGN4_2_2
-      
+
+    @staticmethod
+    def mla_fw(q_nope: Tensor, q_rope: Tensor, c_kv: Tensor,
+               k_rope: Tensor, w_up: Tensor, b_up: Optional[Tensor] = None,
+               query_start: int = 0) -> Tensor:
+        """Fused MLA attention context, shape [B,H,Q,Dv].
+
+        Inputs are ALREADY projected / RoPE-applied / KV-normalized.
+        The CUDA library consumes contiguous float32 HOST storage.
+        This low-level backend call does NOT itself register autograd history.
+        """
+        if len(q_nope.shape) != 4 or len(q_rope.shape) != 4:
+            raise ValueError("q_nope and q_rope must be [B,H,Q,D]")
+        if len(c_kv.shape) != 3 or len(k_rope.shape) != 3:
+            raise ValueError("c_kv and k_rope must be [B,K,D]")
+        if len(w_up.shape) != 2:
+            raise ValueError("w_up must be [H*(Dn+Dv), R]")
+        B, H, Q, Dn = q_nope.shape
+        B2, H2, Q2, Dr = q_rope.shape
+        B3, K, R = c_kv.shape
+        if (B, H, Q) != (B2, H2, Q2) or B != B3 or k_rope.shape != (B,K,Dr):
+            raise ValueError("MLA input dimensions do not match")
+        if w_up.shape[1] != R or w_up.shape[0] % H:
+            raise ValueError("w_up must have H*(Dn+Dv) rows and R columns")
+        Dv = w_up.shape[0] // H - Dn
+        if Dv <= 0 or not (0 <= query_start <= K-Q):
+            raise ValueError("invalid Dv or query_start")
+        if b_up is not None and b_up.size != H * (Dn + Dv):
+            raise ValueError("b_up has incorrect size")
+
+        qn, qr, ck, kr, w = [t.contiguous() for t in (q_nope, q_rope, c_kv, k_rope, w_up)]
+        bias = None if b_up is None else b_up.contiguous()
+        out = q_nope.zeros((B,H,Q,Dv))
+        ptr = np.ctypeslib.ndpointer(dtype=np.float32, ndim=1, flags="C_CONTIGUOUS")
+        fn = lib_mla.launch_mla_forward
+        fn.argtypes = [ptr,ptr,ptr,ptr,ptr,ctypes.c_void_p,ptr] + [ctypes.c_int]*9 + [ctypes.c_float, ctypes.c_void_p]
+        fn.restype = ctypes.c_int
+        bias_addr = None if bias is None else ctypes.c_void_p(bias._tensor._storage.ctypes.data)
+        status = fn(qn._tensor._storage, qr._tensor._storage,
+                    ck._tensor._storage, kr._tensor._storage,
+                    w._tensor._storage, bias_addr, out._tensor._storage,
+                    B,H,Q,K,Dn,Dr,Dv,R,int(query_start),
+                    float((Dn+Dr)**-0.5), None)
+        if status:
+            raise RuntimeError(f"launch_mla_forward failed with status {status}")
+        return out
+
+    @staticmethod
+    def mla_bw(out_grad: Tensor, q_nope: Tensor, q_rope: Tensor,
+               c_kv: Tensor, k_rope: Tensor, w_up: Tensor,
+               b_up: Optional[Tensor] = None, query_start: int = 0):
+        """Return grads (dQ_nope,dQ_rope,dC_KV,dK_rope,dW_up,dB_up).
+
+        dB_up is None when b_up is None. Accumulates gradients for shared
+        KV latents and weights across all heads/queries in CUDA via atomics.
+        """
+        B,H,Q,Dn = q_nope.shape
+        B2,H2,Q2,Dr = q_rope.shape
+        B3,K,R = c_kv.shape
+        if (B,H,Q) != (B2,H2,Q2) or B != B3 or k_rope.shape != (B,K,Dr):
+            raise ValueError("MLA input dimensions do not match")
+        if w_up.shape[1] != R or w_up.shape[0] % H:
+            raise ValueError("invalid w_up dimensions")
+        Dv = w_up.shape[0] // H - Dn
+        if Dv <= 0 or out_grad.shape != (B,H,Q,Dv) or not (0 <= query_start <= K-Q):
+            raise ValueError("invalid upstream gradient shape or query_start")
+        if b_up is not None and b_up.size != H*(Dn+Dv):
+            raise ValueError("invalid b_up size")
+
+        go, qn, qr, ck, kr, w = [t.contiguous() for t in
+                                (out_grad, q_nope, q_rope, c_kv, k_rope, w_up)]
+        bias = None if b_up is None else b_up.contiguous()
+        gqn = q_nope.zeros(q_nope.shape)
+        gqr = q_rope.zeros(q_rope.shape)
+        gck = c_kv.zeros(c_kv.shape)
+        gkr = k_rope.zeros(k_rope.shape)
+        gw = w_up.zeros(w_up.shape)
+        gb = None if b_up is None else b_up.zeros(b_up.shape)
+        ptr = np.ctypeslib.ndpointer(dtype=np.float32, ndim=1, flags="C_CONTIGUOUS")
+        fn = lib_mla.launch_mla_backward
+        fn.argtypes = [ptr]*6 + [ctypes.c_void_p] + [ptr]*5 + [ctypes.c_void_p] + [ctypes.c_int]*9 + [ctypes.c_float,ctypes.c_void_p]
+        fn.restype = ctypes.c_int
+        bias_addr = None if bias is None else ctypes.c_void_p(bias._tensor._storage.ctypes.data)
+        gb_addr = None if gb is None else ctypes.c_void_p(gb._tensor._storage.ctypes.data)
+        status = fn(go._tensor._storage, qn._tensor._storage,
+                    qr._tensor._storage, ck._tensor._storage,
+                    kr._tensor._storage, w._tensor._storage, bias_addr,
+                    gqn._tensor._storage, gqr._tensor._storage,
+                    gck._tensor._storage, gkr._tensor._storage,
+                    gw._tensor._storage, gb_addr,
+                    B,H,Q,K,Dn,Dr,Dv,R,int(query_start),
+                    float((Dn+Dr)**-0.5), None)
+        if status:
+            raise RuntimeError(f"launch_mla_backward failed with status {status}")
+        return gqn, gqr, gck, gkr, gw, gb

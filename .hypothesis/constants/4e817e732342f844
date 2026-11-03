@@ -1,0 +1,4 @@
+# file: /home/chealisa/Desktop/llmsys/project/11868Project/project/run_sentiment_linear.py
+# hypothesis_version: 6.148.7
+
+[0.0, 0.025, 0.1, 0.5, 1.0, 100, 250, 450, 500, '../', 'CudaKernelOps', 'SimpleOps', '__main__', 'label', 'nyu-mll/glue', 'sentence', 'sst2', 'train', 'validation', 'wikipedia_gigaword']

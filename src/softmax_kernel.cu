@@ -14,27 +14,23 @@ const float EPSILON = 1e-8f;
 namespace lightseq {
 namespace cuda {
 /**
-@brief: softmax_kernel
-Softmax forward kernel for
-  enc-self-attn, dec-self-attn, encdec-attn
+ * Masked softmax: out[b,h,q,:] = softmax(inp[b,h,q,:] + mask[b,h,q,:]).
+ * Mask is contiguous, 4D, and may broadcast in each dimension.
+ * Both input and mask are read-only; output has separate storage.
+ */
+__device__ __forceinline__ size_t mask_index(
+    int b, int h, int q, int k,
+    int mb, int mh, int mq, int mk) {
+  int bb = (mb == 1 ? 0 : b);
+  int hh = (mh == 1 ? 0 : h);
+  int qq = (mq == 1 ? 0 : q);
+  int kk = (mk == 1 ? 0 : k);
+  return (((size_t)bb * mh + hh) * mq + qq) * mk + kk;
+}
 
-@thread
-gridDim.x = dynamic
-gridDim.y = batch_size
-gridDim.z = nhead
-blockDim.x = from_len
-
-@param
-inp: [batch_size, nhead, from_len, to_len], softmax input.
-attn_mask: [batch_size, to_len], padding tokens are -inf,
-  non padding tokens are 0.
-  attn_mask!=nullptr for enc-self-attn and enc-dec-attn
-  attn_mask=nullptr and mask_future=ture for dec-self-attn training
-  attn_mask=nullptr and mask_future=false for dec-self-attn infer
-*/
 template <typename T, int block_dim, int ele_per_thread>
-__global__ void ker_attn_softmax_lt32(T *inp, const T *attn_mask, int from_len,
-                                      int to_len, bool mask_future) {
+__global__ void ker_attn_softmax_lt32(const T *inp, const T *attn_mask, T *out,
+                                     int from_len, int to_len, int mb, int mh, int mq, int mk) {
   int batch_id = blockIdx.y;
   int head_id = blockIdx.z;
   const int nhead = gridDim.z;
@@ -48,13 +44,10 @@ __global__ void ker_attn_softmax_lt32(T *inp, const T *attn_mask, int from_len,
       BlockStore;
   __shared__ typename BlockStore::TempStorage ts_store;
 
-  T mval[ele_per_thread];
-  if (attn_mask) {
-    attn_mask += batch_id * to_len;
-    BlockLoad(ts_load).Load(attn_mask, mval, to_len, REDUCE_FLOAT_INF_NEG);
-  }
 
-  inp += flat_3dim(batch_id, head_id, 0, nhead, from_len * to_len);
+  size_t base = (size_t)flat_3dim(batch_id, head_id, 0, nhead, from_len * to_len);
+  inp += base;
+  out += base;
   for (int token_id = blockIdx.x * token_per_reduce; token_id < from_len;
        token_id += gridDim.x * token_per_reduce) {
     T inp_val[token_per_reduce][ele_per_thread];
@@ -71,13 +64,14 @@ __global__ void ker_attn_softmax_lt32(T *inp, const T *attn_mask, int from_len,
     for (int i = 0; i < token_per_reduce; i++) {
       l_max[i] = REDUCE_FLOAT_INF_NEG;
       for (int j = 0; j < ele_per_thread; j++) {
-        float temp_val;
-        if (mask_future && ele_per_thread * threadIdx.x + j > token_id + i) {
-          temp_val = REDUCE_FLOAT_INF_NEG;
-        } else {
+        const int key_id = ele_per_thread * threadIdx.x + j;
+        const int query_id = token_id + i;
+        float temp_val = REDUCE_FLOAT_INF_NEG;
+        if (key_id < to_len && query_id < from_len) {
           temp_val = (float)inp_val[i][j];
-          if (attn_mask) {
-            temp_val += (float)mval[j];
+          if (attn_mask != nullptr) {
+            temp_val += (float)attn_mask[mask_index(
+                batch_id, head_id, query_id, key_id, mb, mh, mq, mk)];
           }
         }
         val[i][j] = temp_val;
@@ -109,15 +103,15 @@ __global__ void ker_attn_softmax_lt32(T *inp, const T *attn_mask, int from_len,
       for (int j = 0; j < ele_per_thread; j++) {
         inp_val[i][j] = (T)(val[i][j] * l_sum[i]);
       }
-      BlockStore(ts_store).Store(inp + (token_id + i) * to_len, inp_val[i],
+      BlockStore(ts_store).Store(out + (token_id + i) * to_len, inp_val[i],
                                  to_len);
     }
   }  // blockIdx.x
 }
 
 template <typename T, int block_dim, int ele_per_thread>
-__global__ void ker_attn_softmax(T *inp, const T *attn_mask, int from_len,
-                                 int to_len, bool mask_future) {
+__global__ void ker_attn_softmax(const T *inp, const T *attn_mask, T *out,
+                                     int from_len, int to_len, int mb, int mh, int mq, int mk) {
   
   int batch_id = blockIdx.y;
   int head_id = blockIdx.z;
@@ -132,13 +126,10 @@ __global__ void ker_attn_softmax(T *inp, const T *attn_mask, int from_len,
       BlockStore;
   __shared__ typename BlockStore::TempStorage ts_store;
 
-  T mval[ele_per_thread];
-  if (attn_mask) {
-    attn_mask += batch_id * to_len;
-    BlockLoad(ts_load).Load(attn_mask, mval, to_len, REDUCE_FLOAT_INF_NEG);
-  }
 
-  inp += flat_3dim(batch_id, head_id, 0, nhead, from_len * to_len);
+  size_t base = (size_t)flat_3dim(batch_id, head_id, 0, nhead, from_len * to_len);
+  inp += base;
+  out += base;
   for (int token_id = blockIdx.x * token_per_reduce; token_id < from_len;
        token_id += gridDim.x * token_per_reduce) {
     T inp_val[token_per_reduce][ele_per_thread];
@@ -155,13 +146,14 @@ __global__ void ker_attn_softmax(T *inp, const T *attn_mask, int from_len,
     for (int i = 0; i < token_per_reduce; i++) {
       l_max[i] = REDUCE_FLOAT_INF_NEG;
       for (int j = 0; j < ele_per_thread; j++) {
-        float temp_val;
-        if (mask_future && ele_per_thread * threadIdx.x + j > token_id + i) {
-          temp_val = REDUCE_FLOAT_INF_NEG;
-        } else {
+        const int key_id = ele_per_thread * threadIdx.x + j;
+        const int query_id = token_id + i;
+        float temp_val = REDUCE_FLOAT_INF_NEG;
+        if (key_id < to_len && query_id < from_len) {
           temp_val = (float)inp_val[i][j];
-          if (attn_mask) {
-            temp_val += (float)mval[j];
+          if (attn_mask != nullptr) {
+            temp_val += (float)attn_mask[mask_index(
+                batch_id, head_id, query_id, key_id, mb, mh, mq, mk)];
           }
         }
         val[i][j] = temp_val;
@@ -209,81 +201,68 @@ __global__ void ker_attn_softmax(T *inp, const T *attn_mask, int from_len,
       for (int j = 0; j < ele_per_thread; j++) {
         inp_val[i][j] = (T)(val[i][j] * s_sum[i]);
       }
-      BlockStore(ts_store).Store(inp + (token_id + i) * to_len, inp_val[i],
+      BlockStore(ts_store).Store(out + (token_id + i) * to_len, inp_val[i],
                                  to_len);
     }
     // END ASSIGN4_1_1
   }  // blockIdx.x
 }
 
-/*
-  attn_mask!=nullptr for enc-self-attn and enc-dec-attn
-  attn_mask=nullptr and mask_future=ture for dec-self-attn training
-  attn_mask=nullptr and mask_future=false for dec-self-attn infer
-*/
-// template <>
-extern "C" {
-void launch_attn_softmax(float *inp, const float *attn_mask,
-                                int batch_size, int nhead, int from_len,
-                                int to_len, bool mask_future,
-                                cudaStream_t stream) {
-
-  int float_size = sizeof(float);
-  int inp_size = batch_size * nhead * from_len * to_len * float_size;
-  int attn_mask_size = batch_size * to_len * float_size;
-
-  float *d_inp, *d_attn_mask;
-  cudaMalloc((void **)&d_inp, inp_size);
-  cudaMalloc((void **)&d_attn_mask, attn_mask_size);
-
-  cudaMemcpy(d_inp, inp, inp_size, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_attn_mask, attn_mask, attn_mask_size, cudaMemcpyHostToDevice);
-
+// Host-backed MiniTorch storage: copy to GPU, execute one fused kernel, copy out.
+extern "C" void launch_attn_softmax(
+    const float *inp, const float *attn_mask, float *out,
+    int batch_size, int nhead, int from_len, int to_len,
+    int mb, int mh, int mq, int mk, cudaStream_t stream) {
+  if (batch_size <= 0 || nhead <= 0 || from_len <= 0 ||
+      to_len <= 0 || to_len > 1024) {
+    fprintf(stderr, "launch_attn_softmax: unsupported dimensions\n");
+    return;
+  }
+  auto cuda_check = [](cudaError_t e, const char *where) {
+    if (e != cudaSuccess) {
+      fprintf(stderr, "%s: %s\n", where, cudaGetErrorString(e));
+      exit(EXIT_FAILURE);
+    }
+  };
+  const size_t count = (size_t)batch_size * nhead * from_len * to_len;
+  const size_t bytes = count * sizeof(float);
+  const size_t mask_bytes = (size_t)mb * mh * mq * mk * sizeof(float);
+  float *d_inp = nullptr, *d_mask = nullptr, *d_out = nullptr;
+  cuda_check(cudaMalloc((void **)&d_inp, bytes), "malloc inp");
+  cuda_check(cudaMalloc((void **)&d_out, bytes), "malloc out");
+  cuda_check(cudaMemcpy(d_inp, inp, bytes, cudaMemcpyHostToDevice), "copy inp");
+  if (attn_mask != nullptr) {
+    cuda_check(cudaMalloc((void **)&d_mask, mask_bytes), "malloc mask");
+    cuda_check(cudaMemcpy(d_mask, attn_mask, mask_bytes,
+                          cudaMemcpyHostToDevice), "copy mask");
+  }
   dim3 grid_dim(1, batch_size, nhead);
+  #define ARGS d_inp, d_mask, d_out, from_len, to_len, mb, mh, mq, mk
   if (to_len <= 32) {
-    ker_attn_softmax_lt32<float, 32, 1><<<grid_dim, 32, 0, stream>>>(
-        d_inp, d_attn_mask, from_len, to_len, mask_future);
+    ker_attn_softmax_lt32<float, 32, 1><<<grid_dim, 32, 0, stream>>>(ARGS);
   } else if (to_len <= 64) {
-    ker_attn_softmax_lt32<float, 32, 2><<<grid_dim, 32, 0, stream>>>(
-        d_inp, d_attn_mask, from_len, to_len, mask_future);
+    ker_attn_softmax_lt32<float, 32, 2><<<grid_dim, 32, 0, stream>>>(ARGS);
   } else if (to_len <= 128) {
     grid_dim.x = 16;
-    ker_attn_softmax<float, 64, 2><<<grid_dim, 64, 0, stream>>>(
-        d_inp, d_attn_mask, from_len, to_len, mask_future);
+    ker_attn_softmax<float, 64, 2><<<grid_dim, 64, 0, stream>>>(ARGS);
   } else if (to_len <= 256) {
     grid_dim.x = 32;
-    ker_attn_softmax<float, 128, 2><<<grid_dim, 128, 0, stream>>>(
-        d_inp, d_attn_mask, from_len, to_len, mask_future);
+    ker_attn_softmax<float, 128, 2><<<grid_dim, 128, 0, stream>>>(ARGS);
   } else if (to_len <= 512) {
     grid_dim.x = 64;
-    ker_attn_softmax<float, 256, 2><<<grid_dim, 256, 0, stream>>>(
-        d_inp, d_attn_mask, from_len, to_len, mask_future);
-  } else if (to_len <= 1024) {
-    grid_dim.x = 128;
-    ker_attn_softmax<float, 512, 2><<<grid_dim, 512, 0, stream>>>(
-        d_inp, d_attn_mask, from_len, to_len, mask_future);
+    ker_attn_softmax<float, 256, 2><<<grid_dim, 256, 0, stream>>>(ARGS);
   } else {
-    throw std::runtime_error(
-        "Sequence length greater than 512 is currently not supported");
+    grid_dim.x = 128;
+    ker_attn_softmax<float, 512, 2><<<grid_dim, 512, 0, stream>>>(ARGS);
   }
-
-  // Copy back to the host
-  cudaMemcpy(inp, d_inp, inp_size, cudaMemcpyDeviceToHost);
-  cudaDeviceSynchronize();
-
-  // Check CUDA execution
-  cudaError_t err = cudaGetLastError();
-  if (err != cudaSuccess) {
-    fprintf(stderr, "launch_attn_softmax Error: %s\n", cudaGetErrorString(err));
-    exit(EXIT_FAILURE);
-  }
-
-  // Free memory on device
+  #undef ARGS
+  cuda_check(cudaGetLastError(), "softmax launch");
+  cuda_check(cudaStreamSynchronize(stream), "softmax synchronize");
+  cuda_check(cudaMemcpy(out, d_out, bytes, cudaMemcpyDeviceToHost), "copy out");
   cudaFree(d_inp);
-  cudaFree(d_attn_mask);
-
-}}
-
+  if (d_mask) cudaFree(d_mask);
+  cudaFree(d_out);
+}
 
 /**
 @brief: ker_attn_softmax_bw
@@ -299,8 +278,9 @@ grad: [batch_size, nhead, seq_len, seq_len], output grad.
 inp: [batch_size, nhead, seq_len, seq_len], **output** of softmax forward.
 */
 template <typename T, int ITERATIONS>
-__global__ void ker_attn_softmax_bw(T *grad, const T *inp, int softmax_length) {
+__global__ void ker_attn_softmax_bw(T *grad, const T *inp, int rows, int softmax_length) {
   int batch_idx = blockIdx.x * blockDim.y + threadIdx.y;
+  if (batch_idx >= rows) return;
   int offset = batch_idx * softmax_length + threadIdx.x;
 
   grad += offset;
@@ -335,8 +315,8 @@ __global__ void ker_attn_softmax_bw(T *grad, const T *inp, int softmax_length) {
 
 // template <typename T>
 extern "C" {
-void launch_attn_softmax_bw(float *out_grad,
-                                const float *soft_outp, int rows,
+void launch_attn_softmax_bw(const float *out_grad,
+                                const float *soft_outp, float *grad_input, int rows,
                                 int softmax_len,
                                 cudaStream_t stream) {
   
@@ -357,19 +337,19 @@ void launch_attn_softmax_bw(float *out_grad,
   // Launch kernel
   // Hint: use ker_attn_softmax_bw<float, ITERATIONS> depending on softmax_len
   if (softmax_len <= 32) {
-    ker_attn_softmax_bw<float, 1><<<grid_dim, block_dim, 0, stream>>>(d_out_grad, d_soft_outp, softmax_len); 
+    ker_attn_softmax_bw<float, 1><<<grid_dim, block_dim, 0, stream>>>(d_out_grad, d_soft_outp, rows, softmax_len); 
   } else if (softmax_len <= 64) {
-    ker_attn_softmax_bw<float, 2><<<grid_dim, block_dim, 0, stream>>>(d_out_grad, d_soft_outp, softmax_len); 
+    ker_attn_softmax_bw<float, 2><<<grid_dim, block_dim, 0, stream>>>(d_out_grad, d_soft_outp, rows, softmax_len); 
   } else if (softmax_len <= 128) {
-    ker_attn_softmax_bw<float, 4><<<grid_dim, block_dim, 0, stream>>>(d_out_grad, d_soft_outp, softmax_len); 
+    ker_attn_softmax_bw<float, 4><<<grid_dim, block_dim, 0, stream>>>(d_out_grad, d_soft_outp, rows, softmax_len); 
   } else if (softmax_len <= 256) {
-    ker_attn_softmax_bw<float, 8><<<grid_dim, block_dim, 0, stream>>>(d_out_grad, d_soft_outp, softmax_len); 
+    ker_attn_softmax_bw<float, 8><<<grid_dim, block_dim, 0, stream>>>(d_out_grad, d_soft_outp, rows, softmax_len); 
   } else if (softmax_len <= 512) {
-    ker_attn_softmax_bw<float, 16><<<grid_dim, block_dim, 0, stream>>>(d_out_grad, d_soft_outp, softmax_len); 
+    ker_attn_softmax_bw<float, 16><<<grid_dim, block_dim, 0, stream>>>(d_out_grad, d_soft_outp, rows, softmax_len); 
   } else if (softmax_len <= 1024) {
-    ker_attn_softmax_bw<float, 32><<<grid_dim, block_dim, 0, stream>>>(d_out_grad, d_soft_outp, softmax_len); 
+    ker_attn_softmax_bw<float, 32><<<grid_dim, block_dim, 0, stream>>>(d_out_grad, d_soft_outp, rows, softmax_len); 
   } else if (softmax_len <= 2048) {
-    ker_attn_softmax_bw<float, 64><<<grid_dim, block_dim, 0, stream>>>(d_out_grad, d_soft_outp, softmax_len); 
+    ker_attn_softmax_bw<float, 64><<<grid_dim, block_dim, 0, stream>>>(d_out_grad, d_soft_outp, rows, softmax_len); 
   }
   else {
     throw std::runtime_error(
@@ -377,8 +357,8 @@ void launch_attn_softmax_bw(float *out_grad,
   }
   // Copy back to the host
   
-  cudaMemcpy(out_grad, d_out_grad, out_grad_size, cudaMemcpyDeviceToHost); 
-  cudaDeviceSynchronize();
+  cudaStreamSynchronize(stream);
+  cudaMemcpy(grad_input, d_out_grad, out_grad_size, cudaMemcpyDeviceToHost);
   // Free memory on device
   cudaFree(d_out_grad); 
   cudaFree(d_soft_outp); 

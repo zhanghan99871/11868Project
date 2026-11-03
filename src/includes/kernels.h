@@ -44,14 +44,14 @@ void launch_quant_ln_bw(T *gamma_grad, T *betta_grad, T *inp_grad, T *cmax_grad,
                         const T *vars, const T *means, const uint8_t *cmask,
                         int batch, int hidden_dim, cudaStream_t stream[2]);
 
-template <typename T>
-void launch_attn_softmax(T *vals, const T *attn_mask, int batch_size, int heads,
-                         int from_len, int to_len, bool mask_future,
-                         cudaStream_t stream);
+extern "C" void launch_attn_softmax(
+    const float *inp, const float *attn_mask, float *out,
+    int batch_size, int heads, int from_len, int to_len,
+    int mask_b, int mask_h, int mask_q, int mask_k, cudaStream_t stream);
 
-template <typename T>
-void launch_attn_softmax_bw(T *out_grad, const T *soft_inp, int rows,
-                            int softmax_len, cudaStream_t stream);
+extern "C" void launch_attn_softmax_bw(
+    const float *out_grad, const float *soft_inp, float *grad_input,
+    int rows, int softmax_len, cudaStream_t stream);
 
 template <typename T>
 void launch_attn_softmax_new(T *out, T *inp, const T *attn_mask, int batch_size,

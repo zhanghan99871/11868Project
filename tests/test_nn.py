@@ -163,7 +163,7 @@ def test_a2_logsumexp(sizes, backend):
     dim=1
     
     x = np.random.randn(*sizes).astype(datatype)
-    A = minitorch.tensor(x.tolist(), backend=backend)
+    A = minitorch.tensor(x.tolist(), backend=backend, requires_grad=True)
     _A = torch.tensor(x, dtype=torch.float32, requires_grad=True)
 
     result = minitorch.logsumexp(A, dim=dim)

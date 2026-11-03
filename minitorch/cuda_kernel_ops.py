@@ -374,62 +374,61 @@ class CudaKernelOps(TensorOps):
 
     @staticmethod
     def attn_softmax_fw(inp: Tensor, mask: Tensor):
-      batch_size, nhead, from_len, to_len = inp.shape
-      is_dec_self_attn = False
-      stream = torch.cuda.current_stream().cuda_stream
+      """Fused row-wise softmax(logits + additive_mask), no input mutation.
 
+      Both tensors have 4 dimensions; mask can broadcast on any dimension.
+      The native interface expects contiguous float32 NumPy host buffers.
+      """
+      if len(inp.shape) != 4 or len(mask.shape) != 4:
+        raise ValueError("Attention logits and mask must be 4D")
+      batch_size, nhead, from_len, to_len = inp.shape
+      mb, mh, mq, mk = mask.shape
+      if any(m not in (1, d) for m, d in zip(mask.shape, inp.shape)):
+        raise ValueError(f"Mask shape {mask.shape} cannot broadcast to {inp.shape}")
+      inp_c = inp.contiguous()
+      mask_c = mask.contiguous()
+      out = inp.zeros(inp.shape)
+      stream = torch.cuda.current_stream().cuda_stream
+      ptr = np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags="C_CONTIGUOUS")
       lib_softmax.launch_attn_softmax.argtypes = [
-        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
-        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_bool,
-        ctypes.c_void_p
+          ptr, ptr, ptr,
+          ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+          ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+          ctypes.c_void_p,
       ]
       lib_softmax.launch_attn_softmax.restype = None
-
       lib_softmax.launch_attn_softmax(
-        inp._tensor._storage,
-        mask._tensor._storage,
-        batch_size,
-        nhead,
-        from_len,
-        to_len,
-        is_dec_self_attn,
-        stream
-      ) 
-
-      return inp
+          inp_c._tensor._storage,
+          mask_c._tensor._storage,
+          out._tensor._storage,
+          batch_size, nhead, from_len, to_len,
+          mb, mh, mq, mk, stream,
+      )
+      return out
 
     @staticmethod
     def attn_softmax_bw(out_grad: Tensor, soft_inp: Tensor):
-      #   BEGIN ASSIGN4_1_2
-    #   raise("Not implemented")
+      """Compute softmax input gradient without overwriting out_grad."""
+      if len(soft_inp.shape) != 4 or out_grad.shape != soft_inp.shape:
+        raise ValueError("Upstream gradient and probabilities must have equal 4D shapes")
       batch_size, nhead, seq_len, softmax_len = soft_inp.shape
+      rows = batch_size * nhead * seq_len
+      grad_c = out_grad.contiguous()
+      soft_c = soft_inp.contiguous()
+      grad_input = out_grad.zeros(out_grad.shape)
       stream = torch.cuda.current_stream().cuda_stream
-      rows = batch_size * nhead * seq_len 
-
+      ptr = np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags="C_CONTIGUOUS")
       lib_softmax.launch_attn_softmax_bw.argtypes = [
-        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
-        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_void_p
+          ptr, ptr, ptr, ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
       ]
       lib_softmax.launch_attn_softmax_bw.restype = None
-
       lib_softmax.launch_attn_softmax_bw(
-        out_grad._tensor._storage,
-        soft_inp._tensor._storage,
-        rows,
-        softmax_len,
-        stream
-      ) 
-
-      return out_grad 
-      #   END ASSIGN4_1_2
+          grad_c._tensor._storage,
+          soft_c._tensor._storage,
+          grad_input._tensor._storage,
+          rows, softmax_len, stream,
+      )
+      return grad_input
 
     @staticmethod
     def layernorm_fw(inp: Tensor, gamma: Tensor, beta: Tensor):

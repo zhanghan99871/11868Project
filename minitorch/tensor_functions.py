@@ -586,45 +586,137 @@ def ones_tensor_from_numpy(shape, backend: TensorBackend = SimpleBackend):
 # Gradient check for tensors
 
 
-import torch
+# import torch
+
+# def grad_central_difference(
+#     f: Any, *vals: Tensor, arg: int = 0, epsilon: float = 1e-6, ind: UserIndex
+# ) -> float:
+#     x = vals[arg]
+#     up_np = np.zeros(x.shape, dtype=np.float64)
+#     up_np[ind] = epsilon
+#     vals1 = [torch.tensor(x.to_numpy().astype(np.float64)) if j != arg else torch.tensor(x.to_numpy().astype(np.float64) + up_np) for j, x in enumerate(vals)]
+#     vals2 = [torch.tensor(x.to_numpy().astype(np.float64)) if j != arg else torch.tensor(x.to_numpy().astype(np.float64) - up_np) for j, x in enumerate(vals)]
+#     delta = float(f(*vals1).sum() - f(*vals2).sum().numpy())
+#     # print(f"Debug in grad_central_difference: delta {delta}")
+#     return delta / (2.0 * epsilon)
+
+
+# def grad_check(f: Any, *vals: Tensor, tol=1e-6) -> None:
+#     for x in vals:
+#         x.requires_grad_(True)
+#         x.zero_grad_()
+#     random.seed(10)
+#     out = f(*vals)
+#     out.sum().backward()
+#     err_msg = """
+#     Gradient check error for function %s.
+
+#     Input %s
+
+#     Received derivative %f for argument %d and index %s,
+#     but was expecting derivative %f from central difference.
+
+#     """
+#     for i, x in enumerate(vals):
+#         ind = x._tensor.sample()
+#         check = grad_central_difference(f, *vals, arg=i, ind=ind)
+#         assert x.grad is not None
+#         np.testing.assert_allclose(
+#             x.grad[ind],
+#             check,
+#             1e-2,
+#             1e-2,
+#             err_msg=err_msg % (f, vals, x.grad[ind], i, ind, check),
+#         )
+
 
 def grad_central_difference(
-    f: Any, *vals: Tensor, arg: int = 0, epsilon: float = 1e-6, ind: UserIndex
-) -> float:
-    x = vals[arg]
-    up_np = np.zeros(x.shape, dtype=np.float64)
-    up_np[ind] = epsilon
-    vals1 = [torch.tensor(x.to_numpy().astype(np.float64)) if j != arg else torch.tensor(x.to_numpy().astype(np.float64) + up_np) for j, x in enumerate(vals)]
-    vals2 = [torch.tensor(x.to_numpy().astype(np.float64)) if j != arg else torch.tensor(x.to_numpy().astype(np.float64) - up_np) for j, x in enumerate(vals)]
-    delta = float(f(*vals1).sum() - f(*vals2).sum().numpy())
-    # print(f"Debug in grad_central_difference: delta {delta}")
-    return delta / (2.0 * epsilon)
+    f,
+    *vals,
+    arg=0,
+    epsilon=1e-2,
+    ind=None,
+):
+    """
+    Estimate the derivative of sum(f(*vals))
+    with respect to vals[arg][ind].
+
+    Uses MiniTorch tensors throughout.
+    """
+    if ind is None:
+        raise ValueError("ind must be provided")
+
+    vals_plus = []
+    vals_minus = []
+
+    for x in vals:
+        arr = x.to_numpy().copy()
+
+        vals_plus.append(
+            tensor_from_numpy(
+                arr.copy(),
+                backend=x.backend,
+                requires_grad=False,
+            )
+        )
+        vals_minus.append(
+            tensor_from_numpy(
+                arr.copy(),
+                backend=x.backend,
+                requires_grad=False,
+            )
+        )
+
+    vals_plus[arg][ind] += epsilon
+    vals_minus[arg][ind] -= epsilon
+
+    y_plus = f(*vals_plus).to_numpy().astype(np.float64)
+    y_minus = f(*vals_minus).to_numpy().astype(np.float64)
+
+    diff = y_plus - y_minus
+
+    return float(np.sum(diff, dtype=np.float64) / (2.0 * epsilon))
 
 
-def grad_check(f: Any, *vals: Tensor, tol=1e-6) -> None:
+def grad_check(f, *vals, tol=1e-2, epsilon=1e-2):
+    """
+    Compare MiniTorch autograd gradients against
+    numerical central differences.
+    """
     for x in vals:
         x.requires_grad_(True)
         x.zero_grad_()
-    random.seed(10)
+
     out = f(*vals)
     out.sum().backward()
-    err_msg = """
-    Gradient check error for function %s.
 
-    Input %s
+    random.seed(10)
 
-    Received derivative %f for argument %d and index %s,
-    but was expecting derivative %f from central difference.
-
-    """
     for i, x in enumerate(vals):
         ind = x._tensor.sample()
-        check = grad_central_difference(f, *vals, arg=i, ind=ind)
-        assert x.grad is not None
+
+        numerical = grad_central_difference(
+            f,
+            *vals,
+            arg=i,
+            ind=ind,
+            epsilon=epsilon,
+        )
+
+        assert x.grad is not None, (
+            f"No gradient computed for argument {i}"
+        )
+
+        analytical = float(x.grad[ind])
+
         np.testing.assert_allclose(
-            x.grad[ind],
-            check,
-            1e-2,
-            1e-2,
-            err_msg=err_msg % (f, vals, x.grad[ind], i, ind, check),
+            analytical,
+            numerical,
+            rtol=tol,
+            atol=tol,
+            err_msg=(
+                f"Gradient mismatch for argument {i}, "
+                f"index {ind}: analytical={analytical}, "
+                f"numerical={numerical}"
+            ),
         )

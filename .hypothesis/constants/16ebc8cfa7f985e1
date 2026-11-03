@@ -1,0 +1,4 @@
+# file: /home/chealisa/Desktop/llmsys/project/11868Project/minitorch/testing.py
+# hypothesis_version: 6.148.7
+
+[1.0, 1.2, 3.5, 5.5, 200, 100000, '2', 'A', '_', 'red']

@@ -39,6 +39,17 @@ class MultiHeadAttention(Module):
             out_projection : Linear output projection layer
             dropout        : Dropout layer
         """
+        if n_embd <= 0:
+            raise ValueError("Embedding dimension must be positive")
+
+        if n_head <= 0:
+            raise ValueError("Number of attention heads must be positive")
+
+        if n_embd % n_head != 0:
+            raise ValueError(
+                f"Embedding dimension ({n_embd}) must be divisible "
+                f"by the number of attention heads ({n_head})"
+            )
         self.backend   = backend
         self.n_embd    = n_embd 
         self.n_head    = n_head
@@ -202,7 +213,7 @@ class FeedForward(Module):
         return x
 
 class TransformerLayer(Module):
-    def __init__(self, n_embd: int, n_head: int, p_dropout: float=0.1, ln_eps: float=1e-8, bias: bool=True, backend: TensorBackend=None, use_fused_kernel: bool=False):
+    def __init__(self, n_embd: int, n_head: int, p_dropout: float=0.1, ln_eps: float=1e-8, bias: bool=True, backend: TensorBackend=None, use_fused_kernel: bool=False, causal: bool=False):
         super().__init__()
         """A Transformer Layer in a Pre-LN Transformer.
 
@@ -221,7 +232,7 @@ class TransformerLayer(Module):
         """
         
         # COPY FROM ASSIGN3_3
-        self.attention = MultiHeadAttention(n_embd, n_head, p_dropout=p_dropout, bias=bias, backend=backend, use_fused_kernel=use_fused_kernel)
+        self.attention = MultiHeadAttention(n_embd, n_head, p_dropout=p_dropout, bias=bias, backend=backend, use_fused_kernel=use_fused_kernel, causal=causal)
         self.ff = FeedForward(n_embd, p_dropout=p_dropout, bias=bias, backend=backend)
         # raise NotImplementedError
 
@@ -283,6 +294,7 @@ class DecoderLM(Module):
         bias: bool=True,
         backend: TensorBackend=None,
         use_fused_kernel: bool=False,
+        n_layer: int=4 
     ):
         super().__init__()
         """A Full Decoder-only Pre-LN Transformer with 4 Transformer Layers.
@@ -307,6 +319,10 @@ class DecoderLM(Module):
             ln : LayerNorm layer after last transformer layer.
             lm_head : Linear layer for projection from (*, n_embd) to (*, n_vocab)
         """
+        if n_layer <= 0:
+            raise ValueError("n_layer must be positive")
+
+        self.n_layer = n_layer
         self.backend             = backend
         self.n_embd              = n_embd
         self.n_vocab             = n_vocab
@@ -319,23 +335,24 @@ class DecoderLM(Module):
         # raise NotImplementedError
 
         self.use_fused_kernel = use_fused_kernel
-        if not self.use_fused_kernel:
-            # COPY FROM ASSIGN3_3
-            self.t_layer_1 = TransformerLayer(n_embd, n_head, p_dropout=p_dropout, ln_eps=ln_eps, bias=bias, backend=backend)
-            self.t_layer_2 = TransformerLayer(n_embd, n_head, p_dropout=p_dropout, ln_eps=ln_eps, bias=bias, backend=backend)
-            self.t_layer_3 = TransformerLayer(n_embd, n_head, p_dropout=p_dropout, ln_eps=ln_eps, bias=bias, backend=backend)
-            self.t_layer_4 = TransformerLayer(n_embd, n_head, p_dropout=p_dropout, ln_eps=ln_eps, bias=bias, backend=backend)
-            self.ln = LayerNorm1d(n_embd, eps=ln_eps, backend=backend)
-            # raise NotImplementedError
-        else:
-            # BEGIN ASSIGN4_3
-            # raise NotImplementedError
-            self.t_layer_1 = TransformerLayer(n_embd, n_head, p_dropout=p_dropout, ln_eps=ln_eps, bias=bias, backend=backend, use_fused_kernel=True)
-            self.t_layer_2 = TransformerLayer(n_embd, n_head, p_dropout=p_dropout, ln_eps=ln_eps, bias=bias, backend=backend, use_fused_kernel=True)
-            self.t_layer_3 = TransformerLayer(n_embd, n_head, p_dropout=p_dropout, ln_eps=ln_eps, bias=bias, backend=backend, use_fused_kernel=True)
-            self.t_layer_4 = TransformerLayer(n_embd, n_head, p_dropout=p_dropout, ln_eps=ln_eps, bias=bias, backend=backend, use_fused_kernel=True)
-            self.ln = LayerNorm1d(n_embd, eps=ln_eps, backend=backend, use_fused_kernel=True)
-            # END ASSIGN4_3
+        self.layers = []
+
+        for i in range(n_layer):
+            layer = TransformerLayer(
+                n_embd=n_embd,
+                n_head=n_head,
+                p_dropout=p_dropout,
+                ln_eps=ln_eps,
+                bias=bias,
+                backend=backend,
+                use_fused_kernel=use_fused_kernel,
+                causal=True,
+            )
+
+            # Register each layer as a Module attribute.
+            setattr(self, f"t_layer_{i + 1}", layer)
+            self.layers.append(layer)
+        self.ln = LayerNorm1d(n_embd, eps=ln_eps, backend=backend, use_fused_kernel=use_fused_kernel)
         
     def forward(self, idx):
         """A Forward pass of a Decoder-only Transformer Language model.
@@ -356,7 +373,7 @@ class DecoderLM(Module):
             pos_embed = self.position_embeddings(pos)  
             embed = token_embed + pos_embed 
             embed = self.dropout(embed) 
-            for layer in [self.t_layer_1, self.t_layer_2, self.t_layer_3, self.t_layer_4]:
+            for layer in self.layers:
                 embed = layer(embed) 
             result = self.ln(embed.view(batch_size * seq_len, self.n_embd))
             x = self.lm_head(result).view(batch_size, seq_len, self.n_vocab) 

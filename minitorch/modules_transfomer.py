@@ -366,28 +366,13 @@ class DecoderLM(Module):
         batch_size, seq_len = idx.shape
         pos = tensor([i for i in range(seq_len)], backend=self.backend).view(1, seq_len)
 
-        if not self.use_fused_kernel:
-            # COPY FROM ASSIGN3_3
-            # raise NotImplementedError
-            token_embed = self.token_embeddings(idx) 
-            pos_embed = self.position_embeddings(pos)  
-            embed = token_embed + pos_embed 
-            embed = self.dropout(embed) 
-            for layer in self.layers:
-                embed = layer(embed) 
-            result = self.ln(embed.view(batch_size * seq_len, self.n_embd))
-            x = self.lm_head(result).view(batch_size, seq_len, self.n_vocab) 
-        else:
-            # BEGIN ASSIGN4_3
-            # raise NotImplementedError
-            token_embed = self.token_embeddings(idx) 
-            pos_embed = self.position_embeddings(pos)  
-            embed = token_embed + pos_embed 
-            embed = self.dropout(embed) 
-            for layer in [self.t_layer_1, self.t_layer_2, self.t_layer_3, self.t_layer_4]:
-                embed = layer(embed) 
-            result = self.ln(embed.view(batch_size * seq_len, self.n_embd))
-            x = self.lm_head(result).view(batch_size, seq_len, self.n_vocab) 
-            # END ASSIGN4_3
+        token_embed = self.token_embeddings(idx) 
+        pos_embed = self.position_embeddings(pos)  
+        embed = token_embed + pos_embed 
+        embed = self.dropout(embed) 
+        for layer in self.layers:
+            embed = layer(embed) 
+        result = self.ln(embed.view(batch_size * seq_len, self.n_embd))
+        x = self.lm_head(result).view(batch_size, seq_len, self.n_vocab) 
 
         return x

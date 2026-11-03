@@ -208,7 +208,7 @@ def test_layernorm(batch_size, dim, eps, backend):
     layer_ = torch.nn.LayerNorm(
         normalized_shape=dim, eps=eps
     )
-    x_minitorch = minitorch.tensor(x.tolist(), backend=backend)
+    x_minitorch = minitorch.tensor(x.tolist(), backend=backend, requires_grad=True)
     x_torch = torch.tensor(x.tolist(), dtype=torch.float32, requires_grad=True)
 
     result = layer(x_minitorch)

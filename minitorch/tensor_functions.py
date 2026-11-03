@@ -678,26 +678,39 @@ def grad_central_difference(
     return float(np.sum(diff, dtype=np.float64) / (2.0 * epsilon))
 
 
+
 def grad_check(f, *vals, tol=1e-2, epsilon=1e-2):
     """
     Compare MiniTorch autograd gradients against
     numerical central differences.
-    """
-    for x in vals:
-        x.requires_grad_(True)
-        x.zero_grad_()
 
-    out = f(*vals)
+    Each argument is treated as an independent leaf
+    tensor, even if it originally came from an operation.
+    """
+
+    # Make independent leaf tensors for gradient checking.
+    check_vals = []
+
+    for x in vals:
+        leaf = tensor_from_numpy(
+            x.to_numpy().copy(),
+            backend=x.backend,
+            requires_grad=True,
+        )
+        check_vals.append(leaf)
+
+    # Compute analytical gradients.
+    out = f(*check_vals)
     out.sum().backward()
 
     random.seed(10)
 
-    for i, x in enumerate(vals):
+    for i, x in enumerate(check_vals):
         ind = x._tensor.sample()
 
         numerical = grad_central_difference(
             f,
-            *vals,
+            *check_vals,
             arg=i,
             ind=ind,
             epsilon=epsilon,

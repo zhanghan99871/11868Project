@@ -285,7 +285,7 @@ class Tensor:
         # matrix through the device in id_map just to re-layout an already-compact tensor.
         expected = 1
         for size, stride in zip(reversed(self.shape), reversed(self._tensor.strides)):
-            if size != 1 and stride != expected:
+            if stride != expected:
                 return Copy.apply(self)
             expected *= size
         return self

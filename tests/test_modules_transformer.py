@@ -130,7 +130,7 @@ def test_transformer_layer(batch_size, seq_len, n_embd, num_heads, causal, p_dro
     X_   = torch.tensor(data, dtype=torch.float32, requires_grad=True)
 
     layer_ = torch.nn.TransformerEncoderLayer(
-        d_model=n_embd, nhead=num_heads, dim_feedforward=256, dropout=0,
+        d_model=n_embd, nhead=num_heads, dim_feedforward=4 * n_embd, dropout=0,
         activation=lambda x: torch.nn.functional.gelu(x, approximate='tanh'),
         # activation="relu", layer_norm_eps=ln_eps,
         batch_first=True, norm_first=True, bias=bias, dtype=torch.float32

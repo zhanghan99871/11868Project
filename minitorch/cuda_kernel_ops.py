@@ -21,7 +21,9 @@ from pathlib import Path
 import numpy as np
 import pycuda.autoinit
 import pycuda.driver as cuda
-import torch
+# Fused kernels run on the legacy default CUDA stream (what torch.cuda.current_stream() returned
+# here); the project does not depend on torch.
+DEFAULT_STREAM = 0
 
 # Load the shared library
 lib = ctypes.CDLL("minitorch/cuda_kernels/combine.so")
@@ -53,6 +55,21 @@ fn_map = {
 }
 
 THREADS_PER_BLOCK = 32
+
+
+def make_resident(t: Tensor) -> Tensor:
+    """Upload a compact 2D float32 tensor to the device once (project addition, inference only).
+
+    Later `x @ t` calls pass the device copy to MatrixMultiplyResidentB instead of copying
+    `t` host->device on every call. The host storage is kept (and must not be mutated
+    afterwards, or the device copy goes stale).
+    """
+    assert len(t.shape) == 2 and t.contiguous() is t, "resident tensors must be compact 2D"
+    lib.DeviceUpload.restype = ctypes.c_void_p
+    lib.DeviceUpload.argtypes = [
+        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'), ctypes.c_long]
+    t._tensor._device_ptr = lib.DeviceUpload(t._tensor._storage, t._tensor._storage.size)
+    return t
 
 class CudaKernelOps(TensorOps):
     @staticmethod
@@ -295,6 +312,7 @@ class CudaKernelOps(TensorOps):
 
     @staticmethod
     def matrix_multiply(a: Tensor, b: Tensor) -> Tensor:
+        d_b = getattr(b._tensor, "_device_ptr", None)  # set by make_resident (2D only)
         both_2d = 0
         if len(a.shape) == 2:
             a = a.contiguous().view(1, a.shape[0], a.shape[1])
@@ -351,20 +369,39 @@ class CudaKernelOps(TensorOps):
         assert len(b._tensor._shape) == 3
         assert len(b._tensor._strides) == 3
 
-        lib.MatrixMultiply(
-            out._tensor._storage,
-            out._tensor._shape.astype(np.int32),
-            out._tensor._strides.astype(np.int32),
-            a._tensor._storage,
-            a._tensor._shape.astype(np.int32),
-            a._tensor._strides.astype(np.int32),
-            b._tensor._storage,
-            b._tensor._shape.astype(np.int32),
-            b._tensor._strides.astype(np.int32),
-            a.shape[0],
-            a.shape[1],
-            b.shape[2]
-        )
+        if d_b is not None:
+            lib.MatrixMultiplyResidentB.argtypes = (
+                lib.MatrixMultiply.argtypes[:6] + [ctypes.c_void_p] + lib.MatrixMultiply.argtypes[7:])
+            lib.MatrixMultiplyResidentB.restype = None
+            lib.MatrixMultiplyResidentB(
+                out._tensor._storage,
+                out._tensor._shape.astype(np.int32),
+                out._tensor._strides.astype(np.int32),
+                a._tensor._storage,
+                a._tensor._shape.astype(np.int32),
+                a._tensor._strides.astype(np.int32),
+                d_b,
+                b._tensor._shape.astype(np.int32),
+                b._tensor._strides.astype(np.int32),
+                a.shape[0],
+                a.shape[1],
+                b.shape[2]
+            )
+        else:
+            lib.MatrixMultiply(
+                out._tensor._storage,
+                out._tensor._shape.astype(np.int32),
+                out._tensor._strides.astype(np.int32),
+                a._tensor._storage,
+                a._tensor._shape.astype(np.int32),
+                a._tensor._strides.astype(np.int32),
+                b._tensor._storage,
+                b._tensor._shape.astype(np.int32),
+                b._tensor._strides.astype(np.int32),
+                a.shape[0],
+                a.shape[1],
+                b.shape[2]
+            )
 
         # Undo 3d if we added it.
         if both_2d:
@@ -390,7 +427,7 @@ class CudaKernelOps(TensorOps):
       inp_c = inp.contiguous()
       mask_c = mask.contiguous()
       out = inp.zeros(inp.shape)
-      stream = torch.cuda.current_stream().cuda_stream
+      stream = DEFAULT_STREAM
       ptr = np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags="C_CONTIGUOUS")
       lib_softmax.launch_attn_softmax.argtypes = [
           ptr, ptr, ptr,
@@ -418,7 +455,7 @@ class CudaKernelOps(TensorOps):
       grad_c = out_grad.contiguous()
       soft_c = soft_inp.contiguous()
       grad_input = out_grad.zeros(out_grad.shape)
-      stream = torch.cuda.current_stream().cuda_stream
+      stream = DEFAULT_STREAM
       ptr = np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags="C_CONTIGUOUS")
       lib_softmax.launch_attn_softmax_bw.argtypes = [
           ptr, ptr, ptr, ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
@@ -437,7 +474,7 @@ class CudaKernelOps(TensorOps):
       #   BEGIN ASSIGN4_2_1
     #   raise("Not implemented")
       rows, hidden_size = inp.shape
-      stream = torch.cuda.current_stream().cuda_stream
+      stream = DEFAULT_STREAM
       ln_res = inp.zeros((rows, hidden_size))
       vars = inp.zeros((rows,))
       means = inp.zeros((rows,))
@@ -476,7 +513,7 @@ class CudaKernelOps(TensorOps):
       #   BEGIN ASSIGN4_2_2
     #   raise("Not implemented")
       rows, hidden_size = inp.shape
-      stream = torch.cuda.current_stream().cuda_stream
+      stream = DEFAULT_STREAM
       gamma_grad = inp.zeros((hidden_size,))
       beta_grad = inp.zeros((hidden_size,))
       inp_grad = inp.zeros((rows, hidden_size))

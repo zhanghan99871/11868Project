@@ -25,6 +25,10 @@ from dataloader import make_dataloader
 from decoder_mla import DecoderLM, MLAConfig
 from gpt2_mla_init import make_gpt2_mla_config, initialize_from_gpt2
 
+import matplotlib
+matplotlib.use("Agg")  # Save figures without opening a GUI
+import matplotlib.pyplot as plt
+
 
 def arguments():
     p = argparse.ArgumentParser()
@@ -37,19 +41,19 @@ def arguments():
     p.add_argument('--svd-device', choices=['cpu', 'cuda'], default='cuda')
     p.add_argument('--svd-niter', type=int, default=2)
     p.add_argument('--seq-len', type=int, default=128)
-    p.add_argument('--batch-size', type=int, default=16)
-    p.add_argument('--grad-accum', type=int, default=2)
-    p.add_argument('--epochs', type=int, default=1)
+    p.add_argument('--batch-size', type=int, default=32)
+    p.add_argument('--grad-accum', type=int, default=1)
+    p.add_argument('--epochs', type=int, default=10)
     p.add_argument('--max-steps', type=int, default=0, help='Optimizer steps; 0 = no limit')
     p.add_argument('--max-train-examples', type=int, default=0, help='Limit dataset blocks; 0 = all')
     p.add_argument('--max-eval-batches', type=int, default=30)
-    p.add_argument('--lr', type=float, default=5e-4)
+    p.add_argument('--lr', type=float, default=1e-5)
     p.add_argument('--weight-decay', type=float, default=0.01)
     p.add_argument('--warmup-steps', type=int, default=20)
     p.add_argument('--clip-grad', type=float, default=1.0)
-    p.add_argument('--log-every', type=int, default=10)
-    p.add_argument('--eval-every', type=int, default=100)
-    p.add_argument('--seed', type=int, default=42)
+    p.add_argument('--log-every', type=int, default=100)
+    p.add_argument('--eval-every', type=int, default=250)
+    p.add_argument('--seed', type=int, default=42) 
     p.add_argument('--no-gradient-checkpointing', action='store_true')
     p.add_argument('--no-bf16', action='store_true')
     p.add_argument('--num-workers', type=int, default=0)
@@ -103,6 +107,56 @@ def save_checkpoint(path, model, step, cfg, metadata):
         'metadata': metadata,
     }, path)
     print(f'Saved model checkpoint: {path}', flush=True)
+
+def plot_loss_curve(train_steps, train_losses,
+                    val_steps, val_losses, output_dir):
+    plt.figure(figsize=(10, 6))
+
+    plt.plot(
+        train_steps,
+        train_losses,
+        label="Training Loss",
+        alpha=0.5,
+        linewidth=1,
+    )
+
+    # Smoothed training loss
+    if len(train_losses) >= 10:
+        window = min(20, len(train_losses))
+        smoothed = np.convolve(
+            train_losses,
+            np.ones(window) / window,
+            mode="valid",
+        )
+
+        plt.plot(
+            train_steps[window - 1:],
+            smoothed,
+            label=f"Training Loss (MA={window})",
+            linewidth=2,
+        )
+
+    if val_losses:
+        plt.plot(
+            val_steps,
+            val_losses,
+            "o-",
+            label="Validation Loss",
+            linewidth=2,
+        )
+
+    plt.xlabel("Optimizer Step")
+    plt.ylabel("Cross-Entropy Loss")
+    plt.title("GPT-2 Medium MLA Fine-Tuning Loss")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    plt.savefig(
+        Path(output_dir) / "loss_curve.png",
+        dpi=200,
+    )
+    plt.close()
 
 
 def main():
@@ -181,6 +235,12 @@ def main():
     step = 0
     optimizer.zero_grad(set_to_none=True)
     model.train()
+    train_steps = []
+    train_losses = []
+
+    val_steps = []
+    val_losses = []
+    best_val_loss = float("inf")
     for epoch in range(args.epochs):
         accum_count = 0
         running_loss = 0.0
@@ -199,6 +259,8 @@ def main():
                     p.grad.div_(accum_count)
             clip_grad_norm_(model.parameters(), args.clip_grad)
             step += 1
+            train_steps.append(step)
+            train_losses.append(running_loss / accum_count)
             lr = lr_at(step)
             for group in optimizer.param_groups:
                 group['lr'] = lr
@@ -213,11 +275,50 @@ def main():
             accum_count = 0
 
             if args.eval_every and step % args.eval_every == 0:
-                stats = evaluate(model, val_loader, device, bf16,
-                                 args.max_eval_batches)
-                print(f'validation step={step}: {stats}', flush=True)
-                save_checkpoint(output/'last.pt', model, step, cfg,
-                                {'source': args.pretrained, 'validation': stats})
+                stats = evaluate(
+                    model, val_loader, device, bf16,
+                    args.max_eval_batches,
+                )
+
+                val_steps.append(step)
+                val_losses.append(stats["loss"])
+
+                print(f"validation step={step}: {stats}", flush=True)
+
+                plot_loss_curve(
+                    train_steps,
+                    train_losses,
+                    val_steps,
+                    val_losses,
+                    output,
+                )
+
+                # save_checkpoint(
+                #     output / "last.pt",
+                #     model,
+                #     step,
+                #     cfg,
+                #     {"source": args.pretrained, "validation": stats},
+                # )
+
+                if stats["loss"] < best_val_loss:
+                    best_val_loss = stats["loss"]
+
+                    save_checkpoint(
+                        output / "best.pt",
+                        model,
+                        step,
+                        cfg,
+                        {
+                            "source": args.pretrained,
+                            "validation": stats,
+                        },
+                    )
+
+                    print(
+                        f"New best validation loss: {best_val_loss:.4f}",
+                        flush=True,
+                    )
             if args.max_steps and step >= args.max_steps:
                 break
 
@@ -227,9 +328,24 @@ def main():
             break
 
     stats = evaluate(model, val_loader, device, bf16, args.max_eval_batches)
+    val_steps.append(step)
+    val_losses.append(stats["loss"])
+
+    plot_loss_curve(
+        train_steps,
+        train_losses,
+        val_steps,
+        val_losses,
+        output,
+    )
     print('Final validation:', stats, flush=True)
-    save_checkpoint(output/'last.pt', model, step, cfg,
-                    {'source': args.pretrained, 'validation': stats})
+    with (output / "loss_history.json").open("w") as f:
+        json.dump({
+            "train_steps": train_steps,
+            "train_losses": train_losses,
+            "val_steps": val_steps,
+            "val_losses": val_losses,
+        }, f, indent=2)
 
 
 if __name__ == '__main__':

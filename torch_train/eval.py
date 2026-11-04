@@ -10,11 +10,11 @@ from dataloader import make_dataloader
 
 def arguments():
     p = argparse.ArgumentParser()
-    p.add_argument('--checkpoint', required=True)
+    p.add_argument('--checkpoint', default="./runs/mla-gpt2-medium/best.pt")
     p.add_argument('--data-cache', default='./data')
     p.add_argument('--split', choices=['validation', 'test'], default='validation')
     p.add_argument('--seq-len', type=int, default=128)
-    p.add_argument('--batch-size', type=int, default=1)
+    p.add_argument('--batch-size', type=int, default=16)
     p.add_argument('--max-eval-batches', type=int, default=0, help='0 = entire split')
     p.add_argument('--prompt', default='The capital of France is')
     p.add_argument('--max-new-tokens', type=int, default=40)

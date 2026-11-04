@@ -3,4 +3,4 @@ __pycache__/
 .pytest_cache/
 */__pycache__/
 /data
-/runs
+/runs/mla-gpt2-medium/*.pt

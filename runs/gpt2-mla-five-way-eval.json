@@ -1,0 +1,50 @@
+{
+  "mla_checkpoint": "runs/mla-gpt2-medium/best.pt",
+  "gpt2_checkpoint": "runs/gpt2-medium-original/best.pt",
+  "split": "validation",
+  "seq_len": 16,
+  "batch_size": 16,
+  "max_batches": 1,
+  "evaluated_batches": 1,
+  "torch_bf16": false,
+  "gpt2_medium": {
+    "loss": 4.802045822143555,
+    "perplexity": 121.75926067919916,
+    "total_nll": 1229.32373046875,
+    "tokens": 256,
+    "elapsed_seconds": 0.6762767559994245
+  },
+  "gpt2_medium_finetuned": {
+    "loss": 3.2322897911071777,
+    "perplexity": 25.33760842773204,
+    "total_nll": 827.4661865234375,
+    "tokens": 256,
+    "elapsed_seconds": 0.01508826300050714
+  },
+  "torch_mla_finetuned": {
+    "loss": 3.300640821456909,
+    "perplexity": 27.130018849552595,
+    "total_nll": 844.9640502929688,
+    "tokens": 256,
+    "elapsed_seconds": 0.11045416699926136
+  },
+  "minitorch_mla_finetuned": {
+    "loss": 3.3006401178005134,
+    "perplexity": 27.129999759348028,
+    "total_nll": 844.9638701569314,
+    "tokens": 256,
+    "elapsed_seconds": 5.585066602998268
+  },
+  "minitorch_minus_torch_mla_loss": -7.036563958173758e-07,
+  "minitorch_attention": "fused",
+  "minitorch_fused_layernorm": false,
+  "minitorch_gpt2_finetuned": {
+    "loss": 3.232289701873217,
+    "perplexity": 25.337606166756988,
+    "total_nll": 827.4661636795436,
+    "tokens": 256,
+    "elapsed_seconds": 4.203288348002388
+  },
+  "minitorch_minus_torch_gpt2_loss": -8.923396066506939e-08,
+  "minitorch_gpt2_attention": "unfused"
+}

@@ -690,4 +690,73 @@ void tensorReduce(
     cudaFree(d_a_strides);
 }
 
+// ---------------------------------------------------------------------------
+// Device-resident right operand (project addition, inference only).
+// Weights are uploaded once with DeviceUpload; MatrixMultiplyResidentB then runs the
+// same MatrixMultiplyKernel as MatrixMultiply but skips allocating, copying and
+// freeing B on every call. The caller owns the device buffer (DeviceFree).
+// ---------------------------------------------------------------------------
+float* DeviceUpload(const float* host, long n) {
+    float* d = NULL;
+    if (cudaMalloc(&d, n * sizeof(float)) != cudaSuccess) {
+      fprintf(stderr, "DeviceUpload: cudaMalloc of %ld floats failed\n", n);
+      exit(EXIT_FAILURE);
+    }
+    cudaMemcpy(d, host, n * sizeof(float), cudaMemcpyHostToDevice);
+    return d;
+}
+
+void DeviceFree(float* d) {
+    cudaFree(d);
+}
+
+void MatrixMultiplyResidentB(
+    float* out,
+    int* out_shape,
+    int* out_strides,
+    float* a_storage,
+    int* a_shape,
+    int* a_strides,
+    float* d_b,
+    int* b_shape,
+    int* b_strides,
+    int batch, int m, int p
+) {
+    int n = a_shape[2];
+
+    float *d_out, *d_a;
+    cudaMalloc(&d_a, batch * m * n * sizeof(float));
+    cudaMalloc(&d_out, batch * m * p * sizeof(float));
+
+    // all six shape/stride arrays in one buffer: one allocation and one copy instead of six
+    int meta[18];
+    for (int i = 0; i < 3; i++) {
+      meta[i] = out_shape[i];  meta[3 + i] = out_strides[i];
+      meta[6 + i] = a_shape[i]; meta[9 + i] = a_strides[i];
+      meta[12 + i] = b_shape[i]; meta[15 + i] = b_strides[i];
+    }
+    int* d_meta;
+    cudaMalloc(&d_meta, sizeof(meta));
+    cudaMemcpy(d_meta, meta, sizeof(meta), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_a, a_storage, batch * m * n * sizeof(float), cudaMemcpyHostToDevice);
+
+    int threadsPerBlock = BASE_THREAD_NUM;
+    dim3 blockDims(threadsPerBlock, threadsPerBlock, 1);
+    dim3 gridDims((m + threadsPerBlock - 1) / threadsPerBlock, (p + threadsPerBlock - 1) / threadsPerBlock, batch);
+    MatrixMultiplyKernel<<<gridDims, blockDims>>>(
+        d_out, d_meta, d_meta + 3, d_a, d_meta + 6, d_meta + 9, d_b, d_meta + 12, d_meta + 15
+    );
+
+    cudaMemcpy(out, d_out, batch * m * p * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaDeviceSynchronize();
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      fprintf(stderr, "MatrixMultiplyResidentB Error: %s\n", cudaGetErrorString(err));
+      exit(EXIT_FAILURE);
+    }
+    cudaFree(d_a);
+    cudaFree(d_out);
+    cudaFree(d_meta);
+}
+
 }

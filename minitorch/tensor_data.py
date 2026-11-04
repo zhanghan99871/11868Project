@@ -162,7 +162,7 @@ class TensorData:
         strides: Optional[UserStrides] = None,
     ):
         if isinstance(storage, np.ndarray):
-            self._storage = storage.astype(datatype)
+            self._storage = storage.astype(datatype, copy=False)  # share storage for views (as upstream minitorch)
         else:
             self._storage = array(storage, dtype=datatype)
 

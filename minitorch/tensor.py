@@ -281,7 +281,14 @@ class Tensor:
 
     def contiguous(self) -> Tensor:
         "Return a contiguous tensor with the same data"
-        return Copy.apply(self)
+        # Already compact row-major: skip the copy. Otherwise every matmul round-trips its weight
+        # matrix through the device in id_map just to re-layout an already-compact tensor.
+        expected = 1
+        for size, stride in zip(reversed(self.shape), reversed(self._tensor.strides)):
+            if size != 1 and stride != expected:
+                return Copy.apply(self)
+            expected *= size
+        return self
 
     def __repr__(self) -> str:
         return self._tensor.to_string()

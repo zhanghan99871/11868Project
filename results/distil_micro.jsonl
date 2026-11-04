@@ -1,0 +1,12 @@
+{"config": "micro", "resident": true, "model": "gpt2-medium", "T": 1, "median_s": 0.5707289492711425}
+{"config": "micro", "resident": true, "model": "gpt2-medium", "T": 2, "median_s": 0.6154333250597119}
+{"config": "micro", "resident": true, "model": "gpt2-medium", "T": 3, "median_s": 0.6172509305179119}
+{"config": "micro", "resident": true, "model": "gpt2-medium", "T": 5, "median_s": 0.6492185238748789}
+{"config": "micro", "resident": true, "model": "gpt2-medium", "T": 7, "median_s": 0.6696981061249971}
+{"config": "micro", "resident": true, "model": "gpt2-medium", "T": 9, "median_s": 0.6607033936306834}
+{"config": "micro", "resident": true, "model": "distilgpt2", "T": 1, "median_s": 0.13198930025100708}
+{"config": "micro", "resident": true, "model": "distilgpt2", "T": 2, "median_s": 0.14368391502648592}
+{"config": "micro", "resident": true, "model": "distilgpt2", "T": 3, "median_s": 0.15130678936839104}
+{"config": "micro", "resident": true, "model": "distilgpt2", "T": 5, "median_s": 0.14601315278559923}
+{"config": "micro", "resident": true, "model": "distilgpt2", "T": 7, "median_s": 0.1529465727508068}
+{"config": "micro", "resident": true, "model": "distilgpt2", "T": 9, "median_s": 0.1614397019147873}

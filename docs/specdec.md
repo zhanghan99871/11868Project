@@ -60,6 +60,11 @@ while GPT-2 uses 1e-5. That difference alone moves medium logits by 5.5e-2, but 
 at every position. Incremental vs full forward and crop+refeed differ by exactly 0. Greedy
 speculative output equals target greedy output in every benchmark run (60/60 below).
 
+> **Update after the MLA merge:** the fused LayerNorm kernel now uses eps=1e-5 (GPT-2's value),
+> recorded as `specdec.common.MINITORCH_LN_EPS`. `specdec.test_correctness` builds its tight reference
+> with that eps, so it now compares against the checkpoint eps. All results on this page were
+> measured with the old eps=1e-8 kernel.
+
 **Main sweep** (`results/sweep_same_node.jsonl`, one allocation on node v007):
 
 | config | decode tok/s | speedup | acceptance | tokens/iter | draft time share | = target greedy |

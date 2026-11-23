@@ -519,6 +519,8 @@ class CudaKernelOps(TensorOps):
       inp_grad = inp.zeros((rows, hidden_size))
       
 
+      # The C launcher takes two streams (dgamma/dbeta kernel, dinp kernel). Both must be declared
+      # and passed: with only one, the second is read from leftover stack memory (undefined behaviour).
       lib_layernorm.launch_layernorm_bw.argtypes = [
         np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
         np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
@@ -531,7 +533,8 @@ class CudaKernelOps(TensorOps):
         np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
         ctypes.c_int,
         ctypes.c_int,
-        ctypes.c_void_p
+        ctypes.c_void_p,  # stream_1
+        ctypes.c_void_p,  # stream_2
       ]
       lib_layernorm.launch_layernorm_bw.restype = None
 
@@ -547,8 +550,9 @@ class CudaKernelOps(TensorOps):
         mean._tensor._storage,
         rows,
         hidden_size,
-        stream
-      ) 
+        stream,
+        stream,
+      )
 
       return inp_grad, gamma_grad, beta_grad
       #   END ASSIGN4_2_2

@@ -15,6 +15,7 @@ from typing import Optional, Tuple, List
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 KVCache = Tuple[Tensor, Tensor]  # (compressed_kv, rotated_shared_key)
 
@@ -241,6 +242,12 @@ class TransformerLayer(nn.Module):
         return x, present
 
 
+def _layer_hidden_states(layer: TransformerLayer, x: Tensor,
+                         past: Optional[KVCache]) -> Tensor:
+    """Run one layer without a cache and return only its hidden states (for checkpointing)."""
+    return layer(x, past_key_value=past, use_cache=False)[0]
+
+
 class DecoderLM(nn.Module):
     """Decoder-only language model with MLA and optionally compressed KV caching.
 
@@ -259,6 +266,9 @@ class DecoderLM(nn.Module):
         self.lm_head = nn.Linear(cfg.n_embd, cfg.n_vocab, bias=False)
         # GPT-like tied embedding / output classifier weights.
         self.lm_head.weight = self.token_embeddings.weight
+        # When True (and training with grad enabled, no KV cache), each layer's activations are
+        # recomputed during backward instead of being stored, trading compute for memory.
+        self.gradient_checkpointing = False
 
     def forward(
         self,
@@ -279,9 +289,15 @@ class DecoderLM(nn.Module):
             self.token_embeddings(idx) + self.position_embeddings(positions)[None]
         )
         new_cache: List[KVCache] = []
+        recompute = (self.gradient_checkpointing and self.training
+                     and torch.is_grad_enabled() and not use_cache)
         for i, layer in enumerate(self.layers):
             past = None if past_key_values is None else past_key_values[i]
-            x, present = layer(x, past_key_value=past, use_cache=use_cache)
+            if recompute:
+                x = checkpoint(_layer_hidden_states, layer, x, past, use_reentrant=False)
+                present = None
+            else:
+                x, present = layer(x, past_key_value=past, use_cache=use_cache)
             if use_cache:
                 assert present is not None
                 new_cache.append(present)

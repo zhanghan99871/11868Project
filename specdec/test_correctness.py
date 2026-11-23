@@ -13,7 +13,7 @@ import numpy as np
 
 from . import common
 from .decoding import autoregressive, speculative
-from .reference import gpt2_logits
+from .reference import checkpoint_ln_eps, gpt2_logits
 
 
 def check(name, ok, detail=""):
@@ -35,16 +35,20 @@ def main():
         models[name] = m
         ids = prompts[0]
         got = m.forward(ids, m.new_cache())
-        # MiniTorch's fused LayerNorm kernel hard-codes eps=1e-8 (GPT-2 uses 1e-5); that alone moves
-        # gpt2-medium logits by ~5e-2, so the tight check uses a reference with the same eps.
-        ref = gpt2_logits(common.model_dir(name), ids, eps=1e-8)
+        # The tight check needs the reference to use the same LayerNorm eps as MiniTorch's fused
+        # kernel: an eps mismatch (1e-8 vs 1e-5) alone moves gpt2-medium logits by ~5e-2.
+        ln_eps, ckpt_eps = common.MINITORCH_LN_EPS, checkpoint_ln_eps(common.model_dir(name))
+        ref = gpt2_logits(common.model_dir(name), ids, eps=ln_eps)
         err = np.abs(got - ref).max()
-        ok &= check(f"{name}: logits vs numpy fp64 ref (eps=1e-8)", err < 1e-2, f"max|diff|={err:.2e}")
-        ref = gpt2_logits(common.model_dir(name), ids)
-        err = np.abs(got - ref).max()
-        agree = (got.argmax(-1) == ref.argmax(-1)).mean()
-        ok &= check(f"{name}: argmax vs numpy fp64 ref (checkpoint eps=1e-5)", agree == 1.0,
-                    f"max|diff|={err:.2e} argmax_agree={agree:.3f} (|logit| max {np.abs(ref).max():.1f})")
+        ok &= check(f"{name}: logits vs numpy fp64 ref (eps={ln_eps:g})", err < 1e-2, f"max|diff|={err:.2e}")
+        if ckpt_eps != ln_eps:
+            # Kernel eps differs from the checkpoint's: the logits cannot match tightly, but the
+            # predicted tokens still should.
+            ref = gpt2_logits(common.model_dir(name), ids)
+            err = np.abs(got - ref).max()
+            agree = (got.argmax(-1) == ref.argmax(-1)).mean()
+            ok &= check(f"{name}: argmax vs numpy fp64 ref (checkpoint eps={ckpt_eps:g})", agree == 1.0,
+                        f"max|diff|={err:.2e} argmax_agree={agree:.3f} (|logit| max {np.abs(ref).max():.1f})")
 
         c = m.new_cache()
         parts = [m.forward(ids[:20], c), m.forward(ids[20:21], c), m.forward(ids[21:30], c), m.forward(ids[30:], c)]

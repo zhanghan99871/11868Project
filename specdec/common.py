@@ -14,6 +14,11 @@ PROMPTS = os.path.join(PROJ, "results", "prompts_wikitext2.json")
 MODELS = {"gpt2": "openai-community/gpt2", "gpt2-medium": "openai-community/gpt2-medium",
           "distilgpt2": "distilbert/distilgpt2"}  # all share the GPT-2 BPE tokenizer
 
+# eps hard-coded in MiniTorch's fused LayerNorm kernel (LN_EPSILON in src/layernorm_kernel.cu).
+# It is 1e-5 (GPT-2's value) since the MLA merge; it was 1e-8 in the copied HW4 kernel.
+# tests/test_kernel_consistency.py fails if this drifts from the kernel source.
+MINITORCH_LN_EPS = 1e-5
+
 
 def model_dir(name):
     from huggingface_hub import snapshot_download

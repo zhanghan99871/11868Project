@@ -10,8 +10,14 @@ import numpy as np
 from safetensors.numpy import load_file
 
 
+def checkpoint_ln_eps(model_dir):
+    """LayerNorm eps stored in the checkpoint's config.json (1e-5 for GPT-2)."""
+    with open(os.path.join(model_dir, "config.json")) as f:
+        return json.load(f)["layer_norm_epsilon"]
+
+
 def gpt2_logits(model_dir, ids, eps=None):
-    """eps=None uses the checkpoint value (1e-5); pass 1e-8 to match MiniTorch's fused LayerNorm."""
+    """eps=None uses the checkpoint value (1e-5); pass common.MINITORCH_LN_EPS to match the fused kernel."""
     with open(os.path.join(model_dir, "config.json")) as f:
         cfg = json.load(f)
     w = {k.removeprefix("transformer."): v.astype(np.float64)

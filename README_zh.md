@@ -64,7 +64,7 @@
 所有正确性检查都通过了，投机解码不会改变 target 的输出。
 
 - **前向精度**：MiniTorch 的 logits 和 float64 numpy 参考实现相比，最大误差分别为 3.7e-4（GPT-2 small）、3.2e-4（medium）、2.1e-4（distilgpt2）。
-- **LayerNorm eps 的差异**：MiniTorch 的 fused LayerNorm 把 eps 写死为 1e-8，而 GPT-2 用的是 1e-5。仅这一点就会让 medium 的 logits 偏移 5.5e-2，但每个位置的 argmax 都不变。所以上一条的误差是在参考实现也用 1e-8 时测的。
+- **LayerNorm eps 的差异**：MiniTorch 的 fused LayerNorm 把 eps 写死为 1e-8，而 GPT-2 用的是 1e-5。仅这一点就会让 medium 的 logits 偏移 5.5e-2，但每个位置的 argmax 都不变。所以上一条的误差是在参考实现也用 1e-8 时测的。（MLA 合并后，fused LayerNorm 的 eps 已改为 1e-5，与 GPT-2 一致，记录在 `specdec.common.MINITORCH_LN_EPS`；`specdec.test_correctness` 的严格检查改用这个 eps。本文所有结果仍是用旧的 1e-8 kernel 测得的。）
 - **KV cache**：增量前向和完整前向的结果误差为 0；cache 回滚（crop）后重新输入，误差也为 0。
 - **贪心等价**：投机解码的输出与 target 贪心生成的结果完全一致。GPT-2 small 作 draft 时 60/60 个运行一致，distilgpt2 作 draft 时 50/50 一致。
 - **采样分布**：在玩具模型上，rejection sampling 的输出分布与目标分布的 TV 距离是 0.012。直接从目标分布采样同样多的样本，TV 距离是 0.011，两者相当。

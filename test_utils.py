@@ -17,7 +17,7 @@ class TestDecorator(object):
         self.dtype = None
         self.max_batch_tokens = max_batch_tokens
         self.max_seq_len = max_seq_len
-        self.epsilon = 1e-8
+        self.epsilon = 1e-5  # must equal LN_EPSILON in src/layernorm_kernel.cu
 
     def init(self, device, nhead):
         # device: str. e.g. "cuda:0"

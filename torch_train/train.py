@@ -5,8 +5,9 @@ Example:
    --batch-size 1 --grad-accum 16 --epochs 1 --max-steps 300
 
 Pretrained weights are converted by randomized SVD on the first run.
-Afterwards supply --init-checkpoint path/to/last.pt to continue from an
-MLA checkpoint (model weights only; optimizer is restarted).
+Afterwards supply --init-checkpoint path/to/best.pt to continue from an
+MLA checkpoint (model weights only; optimizer is restarted). best.pt is
+updated after every periodic evaluation and after the final evaluation.
 """
 import argparse
 import gc
@@ -107,6 +108,18 @@ def save_checkpoint(path, model, step, cfg, metadata):
         'metadata': metadata,
     }, path)
     print(f'Saved model checkpoint: {path}', flush=True)
+
+
+def save_if_best(stats, best_val_loss, path, model, step, cfg, source):
+    """Save `path` if stats['loss'] beats best_val_loss; return the new best loss.
+
+    A NaN loss never counts as an improvement, so it cannot overwrite a good checkpoint.
+    """
+    if not stats['loss'] < best_val_loss:
+        return best_val_loss
+    save_checkpoint(path, model, step, cfg, {'source': source, 'validation': stats})
+    print(f'New best validation loss: {stats["loss"]:.4f}', flush=True)
+    return stats['loss']
 
 def plot_loss_curve(train_steps, train_losses,
                     val_steps, val_losses, output_dir):
@@ -301,24 +314,8 @@ def main():
                 #     {"source": args.pretrained, "validation": stats},
                 # )
 
-                if stats["loss"] < best_val_loss:
-                    best_val_loss = stats["loss"]
-
-                    save_checkpoint(
-                        output / "best.pt",
-                        model,
-                        step,
-                        cfg,
-                        {
-                            "source": args.pretrained,
-                            "validation": stats,
-                        },
-                    )
-
-                    print(
-                        f"New best validation loss: {best_val_loss:.4f}",
-                        flush=True,
-                    )
+                best_val_loss = save_if_best(stats, best_val_loss, output / "best.pt",
+                                             model, step, cfg, args.pretrained)
             if args.max_steps and step >= args.max_steps:
                 break
 
@@ -330,6 +327,10 @@ def main():
     stats = evaluate(model, val_loader, device, bf16, args.max_eval_batches)
     val_steps.append(step)
     val_losses.append(stats["loss"])
+    # Also checkpoint here: with --eval-every 0, or when training improved after the last
+    # periodic evaluation, this is the only place the best weights can be saved.
+    best_val_loss = save_if_best(stats, best_val_loss, output / "best.pt",
+                                 model, step, cfg, args.pretrained)
 
     plot_loss_curve(
         train_steps,

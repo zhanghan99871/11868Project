@@ -114,6 +114,26 @@ estimate of tokens per verify step under greedy decoding). Outputs in `runs/hspe
 `best.pt`, `loss_history.json`, `loss_curve.png`, and the MiniTorch export in `minitorch/`.
 Extra flags pass through, e.g. `bash train.sh --max-steps 200 --eval-every 100` for a quick run.
 
+**Decoding** (`specdec/decoding.py: speculative_block`): per iteration, one drafter pass drafts up
+to k tokens from the verifier's cache (`draft_from_cache`), one verifier pass scores
+`[anchor] + drafts` (appending their latents and returning their hidden taps), and the cache is
+cropped to the anchor plus the accepted drafts; the hidden state at the last accepted position is
+the next summary. Acceptance is shared with `speculative` (greedy, or Leviathan rejection sampling;
+parallel drafts are sampled independently per position, which keeps sampling lossless).
+
+```bash
+python -m specdec.bench --target mla-gpt2-medium --configs micro --n-prompts 1 --out results/hspec_micro.jsonl
+python -m specdec.bench --target mla-gpt2-medium --draft distilgpt2 \
+  --configs ar_target spec_k2 hspec hspec_k3 --out results/hspec_sweep.jsonl
+python -m specdec.summarize results/hspec_sweep.jsonl
+```
+
+`micro` adds one H-Spec drafter pass ("hspec-drafter", T = block size) to the verifier/draft
+latency grid. `hspec[_k{K}][_t{TEMP}]` runs block drafting with K <= block size (default: the
+block size); its "tokens/iter" is the real τ and "identical to target greedy" the losslessness
+check. The drafter is read from `runs/hspec-drafter/minitorch` (`--hspec-drafter` or
+`HSPEC_DRAFTER_DIR` to change).
+
 ## Preliminary results (2026-11-03, V100-32GB, batch 1, fp32)
 
 Setup: 10 WikiText-2 test prompts × 64 prompt tokens, 64 new tokens each. Target is GPT-2 medium

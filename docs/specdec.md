@@ -104,6 +104,16 @@ Two implementations:
 stored; `MiniTorchHSpecDrafter.from_verifier` takes it from the verifier). Tests:
 `python -m pytest tests/model_tests/drafter` (CPU, plus CUDA parity when a GPU is available).
 
+**Training** (`bash train.sh`, which runs `torch_train/train_drafter.py` and then the export):
+trunk from distilgpt2, `kv_up` and the frozen head from the verifier
+(`runs/mla-gpt2-medium/best.pt`); WikiText-2 blocks of 128 tokens, 32 random anchors per
+sequence, one frozen verifier pass per batch for the latents, hidden taps and teacher logits;
+AdamW (lr 3e-4, 1% warmup, cosine to 0), 5 epochs. Validation reports the loss, per-position
+acceptance (1 - TV) and `tau_greedy` (1 + leading top-1 agreements per block, teacher-forced: an
+estimate of tokens per verify step under greedy decoding). Outputs in `runs/hspec-drafter/`:
+`best.pt`, `loss_history.json`, `loss_curve.png`, and the MiniTorch export in `minitorch/`.
+Extra flags pass through, e.g. `bash train.sh --max-steps 200 --eval-every 100` for a quick run.
+
 ## Preliminary results (2026-11-03, V100-32GB, batch 1, fp32)
 
 Setup: 10 WikiText-2 test prompts × 64 prompt tokens, 64 new tokens each. Target is GPT-2 medium

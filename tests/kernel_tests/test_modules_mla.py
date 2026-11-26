@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-SO = Path(__file__).resolve().parents[1] / 'minitorch' / 'cuda_kernels' / 'mla_kernel.so'
+SO = Path(__file__).resolve().parents[2] / 'minitorch' / 'cuda_kernels' / 'mla_kernel.so'
 
 @pytest.fixture(scope='module')
 def setup_mla():

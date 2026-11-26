@@ -14,7 +14,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 SO_PATH = (
     REPO_ROOT

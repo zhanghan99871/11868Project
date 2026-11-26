@@ -16,7 +16,7 @@ import torch
 from transformers import AutoTokenizer, GPT2LMHeadModel
 
 # The existing converter is located in <repo>/project/gpt2_loader.py.
-PROJECT_DIR = Path(__file__).resolve().parents[2] / "project"
+PROJECT_DIR = Path(__file__).resolve().parents[3] / "project"
 sys.path.insert(0, str(PROJECT_DIR))
 
 import minitorch  # noqa: E402

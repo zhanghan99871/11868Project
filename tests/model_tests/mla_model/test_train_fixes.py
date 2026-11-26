@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import torch
 
-PROJECT_DIR = Path(__file__).resolve().parents[2] / "torch_train"
+PROJECT_DIR = Path(__file__).resolve().parents[3] / "torch_train"
 sys.path.insert(0, str(PROJECT_DIR))
 import decoder_mla  # noqa: E402
 from decoder_mla import DecoderLM, MLAConfig  # noqa: E402

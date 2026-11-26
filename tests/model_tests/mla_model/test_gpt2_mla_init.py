@@ -4,7 +4,7 @@ import torch
 from pathlib import Path
 import sys
 # The existing converter is located in <repo>/project/gpt2_loader.py.
-PROJECT_DIR = Path(__file__).resolve().parents[2] / "torch_train"
+PROJECT_DIR = Path(__file__).resolve().parents[3] / "torch_train"
 sys.path.insert(0, str(PROJECT_DIR))
 from decoder_mla import DecoderLM
 from gpt2_mla_init import make_gpt2_mla_config, initialize_from_gpt2

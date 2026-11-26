@@ -232,6 +232,17 @@ class _MiniTorchOps:
         return out.to_numpy()[0]
 
 
+def make_ops(backend=None, resident=True, ln_eps=1e-5):
+    """Numeric backend shared by the MLA models (this verifier, project/minitorch_drafter.py).
+
+    backend=None gives the float32 numpy reference; a MiniTorch TensorBackend(CudaKernelOps) gives
+    MiniTorch matmuls (device-resident weights if `resident`), the fused LayerNorm kernel (which
+    requires ln_eps to equal its hard-coded eps) and the fused MLA attention kernel. Both expose
+    param / tensor / numpy / linear / add / gelu / layernorm / mla.
+    """
+    return _NumpyOps() if backend is None else _MiniTorchOps(backend, resident, ln_eps)
+
+
 # ---------------------------------------------------------------------------
 # cache and model
 # ---------------------------------------------------------------------------
@@ -276,7 +287,7 @@ class MiniTorchMLAGPT2:
         self.vocab_size = cfg.n_vocab
         self.max_len = min(max_len, cfg.n_positions)
         self.resident = backend is not None and resident
-        self.ops = _NumpyOps() if backend is None else _MiniTorchOps(backend, resident, cfg.ln_eps)
+        self.ops = make_ops(backend, resident, cfg.ln_eps)
         self._load(load_file(os.path.join(model_dir, "model.safetensors")))
 
     def _load(self, w):
@@ -297,7 +308,9 @@ class MiniTorchMLAGPT2:
 
         self.wte = np.ascontiguousarray(w["token_embeddings.weight"], dtype=np.float32)  # gathered on host
         self.wpe = np.ascontiguousarray(w["position_embeddings.weight"], dtype=np.float32)
-        self.lm_head = ops.param(w.get("lm_head.weight", self.wte).T, matmul=True)  # [D, V]
+        # LM head [V, D] on the host (the token embedding when tied); a drafter reuses it
+        self.head_weight = np.ascontiguousarray(w.get("lm_head.weight", self.wte), dtype=np.float32)
+        self.lm_head = ops.param(self.head_weight.T, matmul=True)  # [D, V]
         self.ln_f = (ops.param(w["ln.weight"]), ops.param(w["ln.bias"]))
         self.layers = []
         for i in range(cfg.n_layer):

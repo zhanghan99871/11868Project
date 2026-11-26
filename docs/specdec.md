@@ -15,6 +15,7 @@ and every entry point asserts that `torch` was never imported.
 | `minitorch/`, `src/`, `compile_cuda.sh` | copied from `llmsys_hw4`, with the changes listed below |
 | `specdec/model.py` | GPT-2 forward in MiniTorch, per-request KV cache with `crop()` rollback |
 | `specdec/mla_model.py` | MLA verifier (GPT-2 medium converted to MLA) in MiniTorch, per-request latent cache with `crop()`, hidden-state taps; see "MLA verifier" below |
+| `torch_train/hspec_drafter.py`, `project/minitorch_drafter.py` | H-Spec-style parallel drafter: PyTorch (training) and MiniTorch (inference) versions; see "H-Spec drafter" below |
 | `specdec/decoding.py` | autoregressive baseline; speculative decoding (greedy, and rejection sampling per Leviathan et al. 2023) |
 | `specdec/reference.py` | independent float64 numpy GPT-2, used only as a parity reference |
 | `specdec/test_correctness.py` | correctness gates (run before every benchmark) |
@@ -76,6 +77,32 @@ python -m specdec.bench --target mla-gpt2-medium --draft distilgpt2 --configs ar
 The export directory defaults to `runs/mla-gpt2-medium/minitorch` (git-ignored); set
 `MLA_VERIFIER_DIR` to use another. Results from different `--target`s must be summarized
 separately (`summarize.py` refuses to mix them, since speedups use the `ar_target` baseline).
+
+## H-Spec drafter
+
+A block-parallel drafter in the style of H-Spec (arXiv 2609.24197) for the MLA verifier, with a
+GPT-2-small-shaped transformer in place of H-Spec's Mamba-attention hybrid. One forward pass
+drafts k tokens from `[anchor, MASK x k]` and the drafter keeps **no KV cache**:
+
+- **Latent reuse:** drafter layer i attends to the verifier's cached MLA latents of layer
+  `target_layers[i]` (default 12, 14, ..., 22), plus the block's own latents, causally. MLA
+  shares a 512-d latent rather than per-head K/V, so the 768-wide drafter reads the 1024-wide
+  verifier's cache directly; its `kv_up` starts as a copy of that verifier layer's.
+- **Summary:** the verifier's hidden state at the last cached position after `tap_layers`
+  (default 1, 6, 11, 16, 22) is fused and added to the anchor embedding.
+- **Trunk/head:** 6 pre-LN GPT-2 blocks (768 wide, initialized from distilgpt2), then a learned
+  768 -> 1024 projection into the verifier's frozen LM head.
+
+Two implementations:
+
+| | file | used for |
+|---|---|---|
+| PyTorch | `torch_train/hspec_drafter.py` | training: `forward(tokens, anchors, latents, hidden)` drafts many blocks per sequence in one pass (block mask: a block sees only the prefix before its anchor); `target_context` (frozen verifier pass), `sample_anchors`, `block_targets`, `drafter_loss` (0.1 CE + 0.9 TV with exp(-(j-1)/4) position weights), `init_from_gpt2`, `init_from_verifier`; `draft_block` = one block |
+| MiniTorch | `project/minitorch_drafter.py` | inference: port of `draft_block`; attention through the fused MLA kernel (`query_start = P` gives exactly the drafter's mask); `draft_from_cache` / `greedy` read a `specdec` `LatentCache` |
+
+`torch_train/export_hspec_drafter.py` exports a drafter for MiniTorch (the frozen head is not
+stored; `MiniTorchHSpecDrafter.from_verifier` takes it from the verifier). Tests:
+`python -m pytest tests/model_tests/drafter` (CPU, plus CUDA parity when a GPU is available).
 
 ## Preliminary results (2026-11-03, V100-32GB, batch 1, fp32)
 

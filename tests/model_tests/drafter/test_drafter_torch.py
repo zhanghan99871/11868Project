@@ -127,16 +127,23 @@ def test_blocks_see_only_their_prefix(verifier, batch):
         other[b, 0], other[b, 2] = 2, 9  # different neighbouring blocks
         torch.testing.assert_close(run(anc=other), ref, atol=1e-6, rtol=1e-6)
 
-        # sanity: the inputs it may see do matter
+        # sanity: the inputs it may see do matter. Perturb with seeded noise, not a constant: the
+        # summary LayerNorms each tap, so adding the same value to every element cancels exactly.
+        # Require a change far above float32 rounding (~1e-7), which `not allclose` would accept.
+        g = torch.Generator().manual_seed(0)
+
+        def changed(out):
+            return (out - ref).abs().max().item() > 1e-5
+
         lat3 = [(c.clone(), kr.clone()) for c, kr in latents]
-        lat3[0][0][b, a - 1] += 1.0
-        assert not torch.allclose(run(lat=lat3), ref)
+        lat3[0][0][b, a - 1] += torch.randn(lat3[0][0][b, a - 1].shape, generator=g)
+        assert changed(run(lat=lat3))
         hid3 = hidden.clone()
-        hid3[b, a - 1] += 1.0
-        assert not torch.allclose(run(hid=hid3), ref)
+        hid3[b, a - 1] += torch.randn(hid3[b, a - 1].shape, generator=g)
+        assert changed(run(hid=hid3))
         tok3 = tokens.clone()
         tok3[b, a] = (tok3[b, a] + 1) % drafter.cfg.n_vocab
-        assert not torch.allclose(run(tok=tok3), ref)
+        assert changed(run(tok=tok3))
 
 
 def test_input_checks(verifier, batch):

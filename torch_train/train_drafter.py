@@ -1,8 +1,13 @@
-"""Fine-tune the H-Spec drafter (hspec_drafter.py) against the frozen MLA verifier on WikiText-2.
+"""Fine-tune the H-Spec drafter (hspec_drafter.py) against the frozen MLA verifier.
 
 Example (train.sh in the repo root runs this):
   python torch_train/train_drafter.py --verifier-checkpoint runs/mla-gpt2-medium/best.pt \
-      --init distilgpt2 --output-dir runs/hspec-drafter
+      --init distilgpt2 --output-dir runs/hspec-drafter-gen \
+      --train-data data/verifier_gen/train.pt --val-data data/verifier_gen/validation.pt
+
+Data: with --train-data/--val-data, rows of prompt + the verifier's own continuation
+(generate_verifier_data.py); anchors start at prompt_len - 1 (--min-anchor), so every block's
+anchor, prefix and targets are what decoding produces. Without them, blocks of raw WikiText-2.
 
 Initialization: the drafter's trunk (embeddings, LayerNorms, MLPs) comes from distilgpt2, each
 layer's kv_up from the verifier layer whose latents it reads, and the output head is the
@@ -58,6 +63,12 @@ def arguments(argv=None):
     p.add_argument("--summary-to-all-positions", action="store_true")
     p.add_argument("--no-position-embeddings", action="store_true")
     # data
+    p.add_argument("--train-data", default=None,
+                   help="verifier-generated rows (generate_verifier_data.py) instead of raw WikiText-2")
+    p.add_argument("--val-data", default=None, help="verifier-generated validation rows (with --train-data)")
+    p.add_argument("--min-anchor", type=int, default=None,
+                   help="first anchor position; default prompt_len - 1 with --train-data (blocks draft only "
+                        "generated tokens), else 1")
     p.add_argument("--seq-len", type=int, default=128, help="tokens per sequence (the verifier was fine-tuned at 128)")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--anchors-per-seq", type=int, default=32, help="blocks drafted per sequence per step")
@@ -87,9 +98,28 @@ def arguments(argv=None):
                  "epochs", "grad_accum"):
         if getattr(args, name) < 1:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
-    if args.anchors_per_seq > args.seq_len - 1 - args.block_size:
-        raise ValueError(f"--anchors-per-seq must be <= seq_len - 1 - block_size = {args.seq_len - 1 - args.block_size}")
+    if (args.train_data is None) != (args.val_data is None):
+        raise ValueError("--train-data and --val-data go together")
+    check_anchor_room(args.anchors_per_seq, args.seq_len, args.block_size, args.min_anchor or 1)
     return args
+
+
+def check_anchor_room(anchors_per_seq, seq_len, block_size, min_anchor):
+    room = seq_len - 1 - block_size - max(1, min_anchor) + 1
+    if anchors_per_seq > room:
+        raise ValueError(f"--anchors-per-seq must be <= {room} (anchors {max(1, min_anchor)}..{seq_len - 1 - block_size} "
+                         f"for seq_len {seq_len}, block {block_size})")
+
+
+def min_anchor(args):
+    """First anchor position (1 unless --min-anchor or generated data set it)."""
+    return max(1, getattr(args, "min_anchor", None) or 1)
+
+
+def generated_loader(ids, batch_size, shuffle, seed=0):
+    """Batches [B, T] of verifier-generated rows (generate_verifier_data.load_generated)."""
+    gen = torch.Generator().manual_seed(seed) if shuffle else None
+    return torch.utils.data.DataLoader(ids, batch_size=batch_size, shuffle=shuffle, generator=gen)
 
 
 def load_verifier(path, device):
@@ -176,7 +206,7 @@ def evaluate(drafter, verifier, loader, args, device, autocast):
                 break
             tokens = batch[:, :args.seq_len].to(device)
             anchors = sample_anchors(tokens.size(0), tokens.size(1), drafter.cfg.block_size,
-                                     args.anchors_per_seq, gen, device)
+                                     args.anchors_per_seq, gen, device, min_anchor=min_anchor(args))
             loss, stats = drafter_step(drafter, verifier, tokens, anchors, args, autocast)
             n = tokens.size(0)
             sums["loss"] += loss.item() * n
@@ -265,7 +295,7 @@ def train(drafter, verifier, train_loader, val_loader, args, device, output_dir,
         accum, running = 0, defaultdict(float)
         for i, batch in enumerate(train_loader):
             tokens = batch[:, :args.seq_len].to(device, non_blocking=True)
-            anchors = sample_anchors(tokens.size(0), tokens.size(1), k, n_anchors, gen, device)
+            anchors = sample_anchors(tokens.size(0), tokens.size(1), k, n_anchors, gen, device, min_anchor(args))
             loss, stats = drafter_step(drafter, verifier, tokens, anchors, args, autocast)
             loss.backward()
             accum += 1
@@ -321,12 +351,37 @@ def main(argv=None):
 
     print(f"Loading verifier {args.verifier_checkpoint}", flush=True)
     verifier = load_verifier(args.verifier_checkpoint, device)
+    train_loader, val_loader = build_loaders(args, device)  # may shorten args.seq_len to the row length
     if args.seq_len > verifier.cfg.n_positions:
         raise ValueError(f"--seq-len exceeds the verifier's {verifier.cfg.n_positions} positions")
     drafter, info = build_drafter(verifier, args)
     n_params = sum(p.numel() for p in drafter.parameters())
     print(f"Drafter: {n_params / 1e6:.1f}M trainable parameters; reads verifier layers "
           f"{drafter.cfg.target_layers}, taps {drafter.cfg.tap_layers}; {info}", flush=True)
+    train(drafter, verifier, train_loader, val_loader, args, device, args.output_dir, bf16=bf16, info=info)
+
+
+def build_loaders(args, device):
+    """(train, validation) loaders. Generated data also sets args.seq_len (row length cap) and
+    args.min_anchor (default prompt_len - 1) and records the data in args for arguments.json."""
+    if args.train_data:
+        from generate_verifier_data import load_generated
+        train_ids, prompt_len = load_generated(args.train_data)
+        val_ids, val_prompt_len = load_generated(args.val_data)
+        if val_prompt_len != prompt_len or val_ids.size(1) != train_ids.size(1):
+            raise ValueError("train and validation data have different prompt/row lengths")
+        if args.max_train_examples:
+            train_ids = train_ids[:args.max_train_examples]
+        args.seq_len = min(args.seq_len, train_ids.size(1))
+        if args.min_anchor is None:
+            args.min_anchor = prompt_len - 1  # the first anchor is the last prompt token, as in decoding
+        args.data = {"train_rows": train_ids.size(0), "val_rows": val_ids.size(0), "prompt_len": prompt_len,
+                     "row_len": train_ids.size(1)}
+        check_anchor_room(args.anchors_per_seq, args.seq_len, args.block_size, args.min_anchor)
+        print(f"Generated data: {train_ids.size(0)} train / {val_ids.size(0)} validation rows of "
+              f"{train_ids.size(1)} tokens (prompt {prompt_len}); anchors from {args.min_anchor}", flush=True)
+        return (generated_loader(train_ids, args.batch_size, shuffle=True, seed=args.seed),
+                generated_loader(val_ids, args.batch_size, shuffle=False))
 
     from dataloader import make_dataloader
     pin = device.type == "cuda"
@@ -336,7 +391,7 @@ def main(argv=None):
     val_loader = make_dataloader("validation", seq_len=args.seq_len, batch_size=args.batch_size,
                                  cache_dir=args.data_cache, shuffle=False, num_workers=args.num_workers,
                                  pin_memory=pin)
-    train(drafter, verifier, train_loader, val_loader, args, device, args.output_dir, bf16=bf16, info=info)
+    return train_loader, val_loader
 
 
 if __name__ == "__main__":

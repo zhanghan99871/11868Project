@@ -423,12 +423,14 @@ def target_context(verifier, tokens: Tensor, cfg: DrafterConfig):
 
 
 def sample_anchors(batch: int, seq_len: int, block_size: int, n: int,
-                   generator: Optional[torch.Generator] = None, device=None) -> Tensor:
-    """n distinct anchors per row, uniform over [1, seq_len - 1 - block_size], sorted, [batch, n].
+                   generator: Optional[torch.Generator] = None, device=None, min_anchor: int = 1) -> Tensor:
+    """n distinct anchors per row, uniform over [max(1, min_anchor), seq_len - 1 - block_size],
+    sorted, [batch, n].
 
-    Anchor a needs the prefix [0, a), a summary at a-1 and targets up to a + block_size.
+    Anchor a needs the prefix [0, a), a summary at a-1 and targets up to a + block_size. With
+    prompt + generated rows, min_anchor = prompt_len - 1 keeps every target in the generated part.
     """
-    lo, hi = 1, seq_len - 1 - block_size
+    lo, hi = max(1, min_anchor), seq_len - 1 - block_size
     if hi < lo or n > hi - lo + 1:
         raise ValueError(f"cannot pick {n} anchors in [{lo}, {hi}] (seq_len {seq_len}, block {block_size})")
     order = torch.rand(batch, hi - lo + 1, generator=generator).argsort(dim=1)[:, :n]

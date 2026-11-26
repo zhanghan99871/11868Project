@@ -104,15 +104,26 @@ Two implementations:
 stored; `MiniTorchHSpecDrafter.from_verifier` takes it from the verifier). Tests:
 `python -m pytest tests/model_tests/drafter` (CPU, plus CUDA parity when a GPU is available).
 
-**Training** (`bash train.sh`, which runs `torch_train/train_drafter.py` and then the export):
-trunk from distilgpt2, `kv_up` and the frozen head from the verifier
-(`runs/mla-gpt2-medium/best.pt`); WikiText-2 blocks of 128 tokens, 32 random anchors per
-sequence, one frozen verifier pass per batch for the latents, hidden taps and teacher logits;
-AdamW (lr 3e-4, 1% warmup, cosine to 0), 5 epochs. Validation reports the loss, per-position
-acceptance (1 - TV) and `tau_greedy` (1 + leading top-1 agreements per block, teacher-forced: an
-estimate of tokens per verify step under greedy decoding). Outputs in `runs/hspec-drafter/`:
-`best.pt`, `loss_history.json`, `loss_curve.png`, and the MiniTorch export in `minitorch/`.
-Extra flags pass through, e.g. `bash train.sh --max-steps 200 --eval-every 100` for a quick run.
+**Training** (`bash train.sh`: data generation, `torch_train/train_drafter.py`, export).
+Trunk from distilgpt2, `kv_up` and the frozen head from the verifier
+(`runs/mla-gpt2-medium/best.pt`); one frozen verifier pass per batch gives the latents, hidden
+taps and teacher logits; loss 0.1 CE + 0.9 TV; AdamW with 1% warmup and cosine decay to 0.
+
+- Default, `DATA=generated`: `torch_train/generate_verifier_data.py` has the verifier continue
+  64-token WikiText-2 prompts with 64 greedy tokens (as in the benchmark; `data/verifier_gen/`,
+  generated once). The drafter trains on these rows with anchors from the last prompt token on
+  (`--min-anchor` = 63), so every block's prefix, anchor and targets are verifier output: 48
+  anchors per row, lr 6e-4, 5 epochs, outputs in `runs/hspec-drafter-gen/`. Why: the first
+  drafter, trained on human text, reached τ 1.67 in real decoding vs 1.78 estimated in training.
+  More prompts: `--source wikitext-103` or `--prompt-stride 32` on the generation script.
+- `DATA=wikitext`: the earlier setup (raw WikiText-2 blocks, 32 anchors, lr 3e-4,
+  `runs/hspec-drafter/`).
+
+Validation reports the loss, per-position acceptance (1 - TV) and `tau_greedy` (1 + leading top-1
+agreements per block, teacher-forced; on generated data it is measured on verifier text, so it
+should track the benchmark's tokens/iter more closely). Outputs: `best.pt`, `loss_history.json`,
+`loss_curve.png` and the MiniTorch export in `minitorch/`. Extra flags pass through, e.g.
+`bash train.sh --max-steps 200 --eval-every 100` for a quick run.
 
 **Decoding** (`specdec/decoding.py: speculative_block`): per iteration, one drafter pass drafts up
 to k tokens from the verifier's cache (`draft_from_cache`), one verifier pass scores

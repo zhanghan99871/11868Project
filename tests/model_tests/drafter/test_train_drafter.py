@@ -44,17 +44,28 @@ def verifier_ckpt(tmp_path):
 # --- train.sh and arguments --------------------------------------------------------------------
 
 def test_train_sh_flags_parse():
-    """The command in train.sh uses only flags train_drafter.py accepts, with the intended values."""
+    """The commands in train.sh use only flags their scripts accept, with the intended values."""
+    import generate_verifier_data as gvd
     text = (ROOT / "train.sh").read_text().replace("\\\n", " ")
     commands = [shlex.split(line) for line in text.splitlines()
                 if line.strip().startswith("python torch_train/")]
-    train_cmd = next(c for c in commands if c[1] == "torch_train/train_drafter.py")
-    argv = [a for a in train_cmd[2:] if a != "$@"]
-    args = td.arguments(argv)
-    assert args.init == "distilgpt2" and args.verifier_checkpoint == "$VERIFIER"
-    assert (args.seq_len, args.block_size, args.n_layer, args.n_embd) == (128, 7, 6, 768)
+    train_cmds = [td.arguments([a for a in c[2:] if a != "$@"])
+                  for c in commands if c[1] == "torch_train/train_drafter.py"]
+    assert len(train_cmds) == 2  # DATA=generated (default) and DATA=wikitext
+    for args in train_cmds:
+        assert args.init == "distilgpt2" and args.verifier_checkpoint == "$VERIFIER" and args.output_dir == "$OUT"
+        assert (args.seq_len, args.block_size, args.n_layer, args.n_embd) == (128, 7, 6, 768)
+    gen_train, wiki_train = train_cmds
+    assert (gen_train.train_data, gen_train.val_data) == ("$GEN/train.pt", "$GEN/validation.pt")
+    assert wiki_train.train_data is None and (wiki_train.lr, wiki_train.anchors_per_seq) == (3e-4, 32)
+
+    gen = gvd.arguments(next(c for c in commands if c[1] == "torch_train/generate_verifier_data.py")[2:])
+    assert gen.out_dir == "$GEN" and gen.temperature == 0 and gen.prompt_len + gen.gen_len == gen_train.seq_len
+    # the generated-data run's anchors fit between the last prompt token and the end of the row
+    td.check_anchor_room(gen_train.anchors_per_seq, gen_train.seq_len, gen_train.block_size, gen.prompt_len - 1)
+
     export_cmd = next(c for c in commands if c[1] == "torch_train/export_hspec_drafter.py")
-    assert export_cmd[2:] == ["$OUT/best.pt", "$OUT/minitorch"] and args.output_dir == "$OUT"
+    assert export_cmd[2:] == ["$OUT/best.pt", "$OUT/minitorch"]
 
 
 def test_argument_checks():

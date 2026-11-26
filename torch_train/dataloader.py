@@ -10,6 +10,8 @@ from torch.utils.data import DataLoader, Dataset
 DATASET_NAME = "Salesforce/wikitext"
 DATASET_CONFIG = "wikitext-2-raw-v1"
 TOKENIZER_NAME = "openai-community/gpt2-medium"
+# token cache file prefix per WikiText config (wikitext2_* keeps the existing caches valid)
+CACHE_PREFIX = {"wikitext-2-raw-v1": "wikitext2", "wikitext-103-raw-v1": "wikitext103"}
 
 
 class TokenBlockDataset(Dataset):
@@ -33,12 +35,14 @@ class TokenBlockDataset(Dataset):
         return self.ids[start:start + self.seq_len + 1]
 
 
-def get_tokens(split: str, cache_dir: str = './data_cache', tokenizer=None):
+def get_tokens(split: str, cache_dir: str = './data_cache', tokenizer=None, config: str = DATASET_CONFIG):
     if split not in ('train', 'validation', 'test'):
         raise ValueError(f'Unsupported split {split!r}')
+    if config not in CACHE_PREFIX:
+        raise ValueError(f'Unsupported WikiText config {config!r}: {sorted(CACHE_PREFIX)}')
     cache = Path(cache_dir)
     cache.mkdir(parents=True, exist_ok=True)
-    file = cache / f'wikitext2_raw_gpt2_{split}.pt'
+    file = cache / f'{CACHE_PREFIX[config]}_raw_gpt2_{split}.pt'
     if file.exists():
         saved = torch.load(file, map_location='cpu', weights_only=True)
         return saved['ids']
@@ -47,8 +51,8 @@ def get_tokens(split: str, cache_dir: str = './data_cache', tokenizer=None):
     if tokenizer is None:
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
-    print(f'Downloading/tokenizing {DATASET_NAME}/{DATASET_CONFIG}: {split}', flush=True)
-    ds = load_dataset(DATASET_NAME, DATASET_CONFIG, split=split)
+    print(f'Downloading/tokenizing {DATASET_NAME}/{config}: {split}', flush=True)
+    ds = load_dataset(DATASET_NAME, config, split=split)
     # Keep article text and newline boundaries. Blank lines are not training examples.
     texts = [row['text'] for row in ds if row['text'].strip()]
     ids = []

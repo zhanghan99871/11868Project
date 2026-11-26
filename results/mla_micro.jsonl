@@ -1,0 +1,12 @@
+{"config": "micro", "resident": true, "model": "mla-gpt2-medium", "T": 1, "median_s": 0.12492808800016064}
+{"config": "micro", "resident": true, "model": "mla-gpt2-medium", "T": 2, "median_s": 0.12649017600051593}
+{"config": "micro", "resident": true, "model": "mla-gpt2-medium", "T": 3, "median_s": 0.1288430709973909}
+{"config": "micro", "resident": true, "model": "mla-gpt2-medium", "T": 5, "median_s": 0.1305184980010381}
+{"config": "micro", "resident": true, "model": "mla-gpt2-medium", "T": 7, "median_s": 0.133477083996695}
+{"config": "micro", "resident": true, "model": "mla-gpt2-medium", "T": 9, "median_s": 0.13603092700213892}
+{"config": "micro", "resident": true, "model": "distilgpt2", "T": 1, "median_s": 0.030575026001315564}
+{"config": "micro", "resident": true, "model": "distilgpt2", "T": 2, "median_s": 0.03177633700397564}
+{"config": "micro", "resident": true, "model": "distilgpt2", "T": 3, "median_s": 0.03228057899832493}
+{"config": "micro", "resident": true, "model": "distilgpt2", "T": 5, "median_s": 0.03294292799546383}
+{"config": "micro", "resident": true, "model": "distilgpt2", "T": 7, "median_s": 0.03339847100141924}
+{"config": "micro", "resident": true, "model": "distilgpt2", "T": 9, "median_s": 0.03415374899486778}

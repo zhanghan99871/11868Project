@@ -4,6 +4,8 @@ __pycache__/
 */__pycache__/
 /data
 /runs/*/*.pt
+# MiniTorch exports of trained checkpoints (torch_train/export_mla_verifier.py)
+/runs/*/minitorch/
 # Local logs / bytecode
 logs/
 *.pyc

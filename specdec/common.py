@@ -8,7 +8,17 @@ import json
 import os
 import sys
 
-HF_HOME = os.environ.setdefault("HF_HOME", "/ocean/projects/cis260267p/yni3/hf")
+BRIDGES_HF_HOME = "/ocean/projects/cis260267p/yni3/hf"  # shared HF cache on Bridges-2 (jobs/run.sh)
+
+
+def _use_bridges_hf_cache():
+    """On Bridges-2, default HF_HOME to the shared cache. Elsewhere keep Hugging Face's default
+    (~/.cache/huggingface). Must run before huggingface_hub is imported."""
+    if "HF_HOME" not in os.environ and os.path.isdir(BRIDGES_HF_HOME):
+        os.environ["HF_HOME"] = BRIDGES_HF_HOME
+
+
+_use_bridges_hf_cache()
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROMPTS = os.path.join(PROJ, "results", "prompts_wikitext2.json")
 MODELS = {"gpt2": "openai-community/gpt2", "gpt2-medium": "openai-community/gpt2-medium",
@@ -19,10 +29,32 @@ MODELS = {"gpt2": "openai-community/gpt2", "gpt2-medium": "openai-community/gpt2
 # tests/test_kernel_consistency.py fails if this drifts from the kernel source.
 MINITORCH_LN_EPS = 1e-5
 
+# MLA verifier (GPT-2 medium converted to MLA and fine-tuned, see torch_train/), loaded from a
+# torch-free export: python torch_train/export_mla_verifier.py <best.pt> <MLA_VERIFIER_DIR>
+MLA_VERIFIER = "mla-gpt2-medium"
+MLA_VERIFIER_DIR = os.environ.get(
+    "MLA_VERIFIER_DIR", os.path.join(PROJ, "runs", "mla-gpt2-medium", "minitorch"))
+TARGETS = ("gpt2-medium", MLA_VERIFIER)
+
+
+HF_FILES = ("config.json", "model.safetensors", "tokenizer.json")  # all that specdec reads
+
 
 def model_dir(name):
+    """Local snapshot of checkpoint `name`. Uses the HF cache if it holds HF_FILES; otherwise
+    downloads just those files, unless HF_HUB_OFFLINE=1 (Bridges-2 compute nodes, jobs/run.sh)."""
     from huggingface_hub import snapshot_download
-    return snapshot_download(MODELS[name], local_files_only=True)
+    try:
+        from huggingface_hub.errors import LocalEntryNotFoundError
+    except ImportError:  # huggingface_hub < 0.23
+        from huggingface_hub.utils import LocalEntryNotFoundError
+    try:
+        path = snapshot_download(MODELS[name], local_files_only=True)
+        if all(os.path.isfile(os.path.join(path, f)) for f in HF_FILES):
+            return path
+    except LocalEntryNotFoundError:
+        pass
+    return snapshot_download(MODELS[name], allow_patterns=list(HF_FILES))
 
 
 def tokenizer():
@@ -38,6 +70,9 @@ def backend():
 
 
 def load(name, max_len=1024, resident=True):
+    if name == MLA_VERIFIER:
+        from .mla_model import MiniTorchMLAGPT2
+        return MiniTorchMLAGPT2(MLA_VERIFIER_DIR, backend(), max_len=max_len, resident=resident)
     from .model import MiniTorchGPT2
     return MiniTorchGPT2(model_dir(name), backend(), max_len=max_len, resident=resident)
 

@@ -10,13 +10,17 @@ import numpy as np
 
 
 def main(paths):
-    rows, micro = defaultdict(list), []
+    rows, micro, targets = defaultdict(list), [], set()
     for p in paths:
         for line in open(p):
             r = json.loads(line)
             if r["config"] == "micro":
                 micro.append(r)
                 continue
+            targets.add(r.get("target", "gpt2-medium"))  # rows before --target existed used gpt2-medium
+            if len(targets) > 1:
+                sys.exit(f"{p}: results mix targets {sorted(targets)}; speedups would use the wrong "
+                         "baseline, so summarize each target separately")
             # ar_target does not depend on the draft; everything else is labelled with it
             key = r["config"] if r["config"] == "ar_target" else f'{r["config"]} [{r.get("draft", "gpt2")}]'
             rows[key].append(r)

@@ -14,6 +14,7 @@ and every entry point asserts that `torch` was never imported.
 |---|---|
 | `minitorch/`, `src/`, `compile_cuda.sh` | copied from `llmsys_hw4`, with the changes listed below |
 | `specdec/model.py` | GPT-2 forward in MiniTorch, per-request KV cache with `crop()` rollback |
+| `specdec/mla_model.py` | MLA verifier (GPT-2 medium converted to MLA) in MiniTorch, per-request latent cache with `crop()`, hidden-state taps; see "MLA verifier" below |
 | `specdec/decoding.py` | autoregressive baseline; speculative decoding (greedy, and rejection sampling per Leviathan et al. 2023) |
 | `specdec/reference.py` | independent float64 numpy GPT-2, used only as a parity reference |
 | `specdec/test_correctness.py` | correctness gates (run before every benchmark) |
@@ -47,6 +48,34 @@ python -m specdec.summarize results/sweep_same_node.jsonl
 
 Use the venv `/jet/home/yni3/11868/llmsys_hw4/.venv` and `module load cuda/12.4.0`.
 Run from the project root, because `ctypes.CDLL` loads kernels by relative path.
+
+## MLA verifier
+
+The target for MLA + H-Spec-style drafting is the PyTorch MLA model trained by
+`torch_train/train.py` (GPT-2 medium, `kv_rank` 512, RoPE dim 32). `specdec/mla_model.py`
+runs it in MiniTorch with the same interface as `MiniTorchGPT2`, so `decoding.py` and
+`bench.py` use it unchanged:
+
+- The cache holds only the MLA latents per layer, `c_kv` [T, 512] and the shared rotary key
+  `k_rope` [T, 32] (post-RoPE): 13,056 floats per token vs 49,152 for the MHA GPT-2 medium.
+  `cache.latents(layer)` exposes them for a drafter to attend to in place.
+- Attention runs through the fused MLA kernel (`CudaKernelOps.mla_fw`), which never
+  materializes per-head K/V; matmul weights are device-resident.
+- `forward(..., hidden_layers=[...])` also returns the residual stream after those layers at
+  every fed position (the drafter's last-token summary input).
+- `backend=None` runs the same model with numpy ops on CPU (used by the tests).
+
+```bash
+python torch_train/export_mla_verifier.py runs/mla-gpt2-medium/best.pt runs/mla-gpt2-medium/minitorch  # once, needs torch
+python -m pytest tests/verifier                     # CPU tests + GPU tests (skipped without CUDA);
+                                                    # MLA_CHECKPOINT=... also checks the trained model
+python -m specdec.bench --target mla-gpt2-medium --draft distilgpt2 --configs micro --n-prompts 1 --out results/mla_micro.jsonl
+python -m specdec.bench --target mla-gpt2-medium --draft distilgpt2 --configs ar_target spec_k2 --out results/mla_sweep.jsonl
+```
+
+The export directory defaults to `runs/mla-gpt2-medium/minitorch` (git-ignored); set
+`MLA_VERIFIER_DIR` to use another. Results from different `--target`s must be summarized
+separately (`summarize.py` refuses to mix them, since speedups use the `ar_target` baseline).
 
 ## Preliminary results (2026-11-03, V100-32GB, batch 1, fp32)
 

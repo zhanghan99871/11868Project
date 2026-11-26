@@ -19,6 +19,13 @@ MODELS = {"gpt2": "openai-community/gpt2", "gpt2-medium": "openai-community/gpt2
 # tests/test_kernel_consistency.py fails if this drifts from the kernel source.
 MINITORCH_LN_EPS = 1e-5
 
+# MLA verifier (GPT-2 medium converted to MLA and fine-tuned, see torch_train/), loaded from a
+# torch-free export: python torch_train/export_mla_verifier.py <best.pt> <MLA_VERIFIER_DIR>
+MLA_VERIFIER = "mla-gpt2-medium"
+MLA_VERIFIER_DIR = os.environ.get(
+    "MLA_VERIFIER_DIR", os.path.join(PROJ, "runs", "mla-gpt2-medium", "minitorch"))
+TARGETS = ("gpt2-medium", MLA_VERIFIER)
+
 
 def model_dir(name):
     from huggingface_hub import snapshot_download
@@ -38,6 +45,9 @@ def backend():
 
 
 def load(name, max_len=1024, resident=True):
+    if name == MLA_VERIFIER:
+        from .mla_model import MiniTorchMLAGPT2
+        return MiniTorchMLAGPT2(MLA_VERIFIER_DIR, backend(), max_len=max_len, resident=resident)
     from .model import MiniTorchGPT2
     return MiniTorchGPT2(model_dir(name), backend(), max_len=max_len, resident=resident)
 

@@ -80,6 +80,15 @@ def load(name, max_len=1024, resident=True):
     return MiniTorchGPT2(model_dir(name), backend(), max_len=max_len, resident=resident)
 
 
+def load_gpt2_dir(path, max_len=1024, resident=True):
+    """A GPT-2 checkpoint saved with save_pretrained (config.json + model.safetensors), e.g. the
+    fine-tuned drafters of torch_train/finetune_distilgpt2.py."""
+    from .model import MiniTorchGPT2
+    if not os.path.isfile(os.path.join(path, "model.safetensors")):
+        raise FileNotFoundError(f"no model.safetensors in {path}")
+    return MiniTorchGPT2(path, backend(), max_len=max_len, resident=resident)
+
+
 def load_hspec_drafter(target, drafter_dir=None, resident=True):
     """The H-Spec drafter (project/minitorch_drafter.py) for a loaded MLA verifier `target`."""
     project = os.path.join(PROJ, "project")

@@ -145,6 +145,42 @@ block size); its "tokens/iter" is the real τ and "identical to target greedy" t
 check. The drafter is read from `runs/hspec-drafter/minitorch` (`--hspec-drafter` or
 `HSPEC_DRAFTER_DIR` to change).
 
+## Drafter ablation (`eval.sh`)
+
+Drafter architecture x drafter training data, all against the frozen MLA verifier:
+
+| | WikiText-2 text | verifier-generated text (`data/verifier_gen_s32`) |
+|---|---|---|
+| distilgpt2, classic autoregressive drafter | `runs/distil-drafter-wikitext` | `runs/distil-drafter-gen-s32` |
+| H-Spec block drafter | `runs/hspec-drafter-a64-lr6e-4-e10` | `runs/hspec-drafter-gen-s32` |
+
+All four start from distilgpt2 and use the same verifier-teacher loss (0.1 CE + 0.9 TV),
+optimizer, schedule, batch (16 x 128 tokens), 10 epochs and data files, so only the architecture
+and the data change. The classic drafters are trained by `torch_train/finetune_distilgpt2.py`
+(next-token positions, no block weights; on generated rows only the predictions of generated
+tokens are scored; lr 2e-4, `DISTIL_LR`); its validation `tau_greedy[k-1]` is the classic
+drafter's mean tokens per verifier step with k drafts, the counterpart of the H-Spec drafter's.
+Its `best/` (`save_pretrained`) loads directly in specdec: `python -m specdec.bench --draft-dir
+runs/distil-drafter-gen-s32/best --draft-label distil-gen ...`. The H-Spec cells reuse the two
+runs above (trained with the same settings, which `tests/model_tests/drafter/test_eval_sh.py`
+checks). The stride-32 generated set has 74,745 rows against WikiText-2's 18.6k blocks of 128, so
+the generated-data runs take ~4x as many steps in their 10 epochs.
+
+```bash
+bash eval.sh                   # train what is missing, export, benchmark, summarize
+STAGES=train bash eval.sh      # or split across allocations: train ...
+STAGES=bench bash eval.sh      # ... then benchmark (configs already in results/eval.jsonl are skipped)
+N_PROMPTS=20 TEMPS=1.0 bash eval.sh   # more prompts, plus sampling at temperature 1
+DRY_RUN=1 bash eval.sh         # print the commands
+```
+
+The bench stage runs `ar_target`, `spec_k2..k5` for each classic drafter (and pretrained
+distilgpt2 as a no-fine-tuning reference, `REFERENCE=0` to skip) and `hspec_k3`, `hspec_k5`,
+`hspec` (k = 7) for each H-Spec drafter, on the same prompts, into `results/eval.jsonl` with
+labels `distilgpt2-pretrained`, `distil-wikitext`, `distil-gen`, `hspec-wikitext`, `hspec-gen`.
+`results/eval.md` (`specdec.summarize`) has the per-config table plus the fastest config per
+drafter.
+
 ## Preliminary results (2026-11-03, V100-32GB, batch 1, fp32)
 
 Setup: 10 WikiText-2 test prompts × 64 prompt tokens, 64 new tokens each. Target is GPT-2 medium

@@ -42,7 +42,7 @@ def main(paths):
     for cfg, rs in rows.items():
         tps = sum(r["n_new"] for r in rs) / sum(r["decode_time"] for r in rs)
         sp = f"{tps / ref_tps:.2f}x" if ref_tps else "-"
-        if cfg.startswith("spec"):
+        if cfg.startswith(("spec", "hspec")):  # classic and H-Spec speculative decoding
             acc = sum(r["accepted"] for r in rs) / max(1, sum(r["drafted"] for r in rs))
             tpi = sum(r["accepted"] + r["iterations"] for r in rs) / sum(r["iterations"] for r in rs)
             share = sum(r["draft_time"] for r in rs) / sum(r["draft_time"] + r["target_time"] for r in rs)

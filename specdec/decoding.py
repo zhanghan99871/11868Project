@@ -1,6 +1,8 @@
 """Autoregressive and speculative decoding (Leviathan et al., 2023) for batch size 1.
 
 Both models expose `forward(ids, cache, last_only)` and `new_cache()`.
+`speculative` drafts autoregressively with a second LM (its own cache); `speculative_block`
+drafts a whole block per pass with an H-Spec-style drafter that reads the verifier's cache.
 
 Cache invariant: a cache holds K/V for a prefix of `tokens`; whatever suffix is
 missing is fed at the next call. After verification both caches are cropped to
@@ -57,6 +59,35 @@ def _timed(model, ids, cache, last_only, stats, which):
     return out
 
 
+def _accept(lg, drafts, qs, temperature, rng):
+    """Verify drafts against the target's logits lg [len(drafts) + 1, V] (row i follows drafts[:i]).
+
+    Returns (n, nxt): the number of accepted drafts and the token that follows them (the target's
+    correction at the first rejection, or the bonus token if all are accepted). Greedy: accept
+    while the draft is the target's argmax. Sampling (Leviathan et al. 2023): accept drafts[i]
+    with probability min(1, p_i(d) / q_i(d)), where qs[i] is the distribution it was sampled from;
+    on rejection resample from max(p_i - q_i, 0). The output is distributed as target sampling.
+    """
+    kk = len(drafts)
+    n, nxt = 0, None
+    if temperature == 0:
+        while n < kk and int(np.argmax(lg[n])) == drafts[n]:
+            n += 1
+        return n, int(np.argmax(lg[n]))
+    while n < kk:
+        p = _probs(lg[n], temperature)
+        d = drafts[n]
+        if rng.random() < min(1.0, p[d] / qs[n][d]):
+            n += 1
+            continue
+        resid = np.maximum(p - qs[n], 0.0)
+        nxt = int(rng.choice(len(resid), p=resid / resid.sum()))
+        break
+    if nxt is None:
+        nxt = int(rng.choice(lg.shape[1], p=_probs(lg[kk], temperature)))
+    return n, nxt
+
+
 def autoregressive(model, prompt, n_new, temperature=0.0, rng=None):
     stats = Stats()
     t_start = time.perf_counter()
@@ -100,28 +131,74 @@ def speculative(target, draft, prompt, n_new, k, temperature=0.0, rng=None):
 
         # one target forward scores every draft position plus the bonus position
         lg = _timed(target, tokens[tc.length:] + drafts, tc, False, stats, "target")[-(kk + 1):]
-
-        n = 0
-        nxt = None
-        if temperature == 0:
-            while n < kk and int(np.argmax(lg[n])) == drafts[n]:
-                n += 1
-            nxt = int(np.argmax(lg[n]))
-        else:
-            while n < kk:
-                p = _probs(lg[n], temperature)
-                d = drafts[n]
-                if rng.random() < min(1.0, p[d] / qs[n][d]):
-                    n += 1
-                    continue
-                resid = np.maximum(p - qs[n], 0.0)
-                nxt = int(rng.choice(len(resid), p=resid / resid.sum()))
-                break
-            if nxt is None:
-                nxt = int(rng.choice(lg.shape[1], p=_probs(lg[kk], temperature)))
+        n, nxt = _accept(lg, drafts, qs, temperature, rng)
 
         tc.crop(len(tokens) + n)
         dc.crop(min(dc.length, len(tokens) + n))
+        tokens += drafts[:n] + [nxt]
+        produced += n + 1
+        stats.iterations += 1
+        stats.drafted += kk
+        stats.accepted += n
+        stats.accepted_per_iter.append(n)
+
+    stats.total_time = time.perf_counter() - t_start
+    return tokens[len(prompt):len(prompt) + n_new], stats
+
+
+def speculative_block(target, drafter, prompt, n_new, k=None, temperature=0.0, rng=None):
+    """Speculative decoding with a block-parallel drafter that keeps no cache (H-Spec style).
+
+    `target` is the MLA verifier (mla_model.MiniTorchMLAGPT2: forward(..., hidden_layers=...));
+    `drafter` is project/minitorch_drafter.MiniTorchHSpecDrafter (or anything with
+    `cfg.block_size`, `cfg.tap_layers` and `draft_from_cache(anchor, cache, summary)`).
+
+    Invariant at the top of each iteration: the verifier's cache holds tokens[:-1]; tokens[-1] is
+    the anchor (not yet cached), and `summary` is the verifier's hidden state at the last cached
+    position after each tap layer. One drafter pass drafts up to k tokens at once from that cache;
+    one verifier pass scores [anchor] + drafts, appending their latents and returning their hidden
+    states; the cache is cropped back to the anchor and the n accepted drafts, and the hidden
+    state at the last accepted position becomes the next summary.
+
+    k defaults to the drafter's block size (and may not exceed it). Needs >= 2 prompt tokens: the
+    first summary is the verifier's hidden state at the token before the anchor.
+    """
+    taps = list(drafter.cfg.tap_layers)
+    k = drafter.cfg.block_size if k is None else k
+    if not 1 <= k <= drafter.cfg.block_size:
+        raise ValueError(f"k must be in [1, {drafter.cfg.block_size}], got {k}")
+    if len(prompt) < 2:
+        raise ValueError("speculative_block needs at least 2 prompt tokens")
+    stats = Stats()
+    t_start = time.perf_counter()
+    cache = target.new_cache()
+    tokens = list(prompt)
+    _, hidden = target.forward(tokens[:-1], cache, last_only=True, hidden_layers=taps)
+    summary = hidden[:, -1]
+    stats.prefill_time = time.perf_counter() - t_start
+
+    produced = 0
+    while produced < n_new:
+        kk = min(k, n_new - produced - 1)  # never draft past the requested length
+        drafts, qs = [], []
+        if kk > 0:
+            t0 = time.perf_counter()
+            for row in drafter.draft_from_cache(tokens[-1], cache, summary)[:kk]:
+                tok, q = _pick(row, temperature, rng)
+                drafts.append(tok)
+                qs.append(q)
+            stats.draft_calls += 1
+            stats.draft_time += time.perf_counter() - t0
+
+        P = cache.length
+        t0 = time.perf_counter()
+        lg, hidden = target.forward([tokens[-1]] + drafts, cache, last_only=False, hidden_layers=taps)
+        stats.target_calls += 1
+        stats.target_time += time.perf_counter() - t0
+        n, nxt = _accept(lg, drafts, qs, temperature, rng)
+
+        cache.crop(P + 1 + n)  # the anchor and the n accepted drafts
+        summary = hidden[:, n]  # the last accepted position, whose output is nxt
         tokens += drafts[:n] + [nxt]
         produced += n + 1
         stats.iterations += 1

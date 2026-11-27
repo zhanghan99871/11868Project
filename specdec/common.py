@@ -35,6 +35,9 @@ MLA_VERIFIER = "mla-gpt2-medium"
 MLA_VERIFIER_DIR = os.environ.get(
     "MLA_VERIFIER_DIR", os.path.join(PROJ, "runs", "mla-gpt2-medium", "minitorch"))
 TARGETS = ("gpt2-medium", MLA_VERIFIER)
+# H-Spec drafter for the MLA verifier: bash train.sh, which exports to this directory
+HSPEC_DRAFTER_DIR = os.environ.get(
+    "HSPEC_DRAFTER_DIR", os.path.join(PROJ, "runs", "hspec-drafter", "minitorch"))
 
 
 HF_FILES = ("config.json", "model.safetensors", "tokenizer.json")  # all that specdec reads
@@ -75,6 +78,16 @@ def load(name, max_len=1024, resident=True):
         return MiniTorchMLAGPT2(MLA_VERIFIER_DIR, backend(), max_len=max_len, resident=resident)
     from .model import MiniTorchGPT2
     return MiniTorchGPT2(model_dir(name), backend(), max_len=max_len, resident=resident)
+
+
+def load_hspec_drafter(target, drafter_dir=None, resident=True):
+    """The H-Spec drafter (project/minitorch_drafter.py) for a loaded MLA verifier `target`."""
+    project = os.path.join(PROJ, "project")
+    if project not in sys.path:
+        sys.path.insert(0, project)
+    from minitorch_drafter import MiniTorchHSpecDrafter
+    return MiniTorchHSpecDrafter.from_verifier(drafter_dir or HSPEC_DRAFTER_DIR, target, backend=backend(),
+                                               resident=resident)
 
 
 def prompts(n=None):

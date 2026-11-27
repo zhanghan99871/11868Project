@@ -104,6 +104,47 @@ Two implementations:
 stored; `MiniTorchHSpecDrafter.from_verifier` takes it from the verifier). Tests:
 `python -m pytest tests/model_tests/drafter` (CPU, plus CUDA parity when a GPU is available).
 
+**Training** (`bash train.sh`: data generation, `torch_train/train_drafter.py`, export).
+Trunk from distilgpt2, `kv_up` and the frozen head from the verifier
+(`runs/mla-gpt2-medium/best.pt`); one frozen verifier pass per batch gives the latents, hidden
+taps and teacher logits; loss 0.1 CE + 0.9 TV; AdamW with 1% warmup and cosine decay to 0.
+
+- Default, `DATA=generated`: `torch_train/generate_verifier_data.py` has the verifier continue
+  64-token WikiText-2 prompts with 64 greedy tokens (as in the benchmark; `data/verifier_gen/`,
+  generated once). The drafter trains on these rows with anchors from the last prompt token on
+  (`--min-anchor` = 63), so every block's prefix, anchor and targets are verifier output: 48
+  anchors per row, lr 6e-4, 5 epochs, outputs in `runs/hspec-drafter-gen/`. Why: the first
+  drafter, trained on human text, reached τ 1.67 in real decoding vs 1.78 estimated in training.
+  More prompts: `--source wikitext-103` or `--prompt-stride 32` on the generation script.
+- `DATA=wikitext`: the earlier setup (raw WikiText-2 blocks, 32 anchors, lr 3e-4,
+  `runs/hspec-drafter/`).
+
+Validation reports the loss, per-position acceptance (1 - TV) and `tau_greedy` (1 + leading top-1
+agreements per block, teacher-forced; on generated data it is measured on verifier text, so it
+should track the benchmark's tokens/iter more closely). Outputs: `best.pt`, `loss_history.json`,
+`loss_curve.png` and the MiniTorch export in `minitorch/`. Extra flags pass through, e.g.
+`bash train.sh --max-steps 200 --eval-every 100` for a quick run.
+
+**Decoding** (`specdec/decoding.py: speculative_block`): per iteration, one drafter pass drafts up
+to k tokens from the verifier's cache (`draft_from_cache`), one verifier pass scores
+`[anchor] + drafts` (appending their latents and returning their hidden taps), and the cache is
+cropped to the anchor plus the accepted drafts; the hidden state at the last accepted position is
+the next summary. Acceptance is shared with `speculative` (greedy, or Leviathan rejection sampling;
+parallel drafts are sampled independently per position, which keeps sampling lossless).
+
+```bash
+python -m specdec.bench --target mla-gpt2-medium --configs micro --n-prompts 1 --out results/hspec_micro.jsonl
+python -m specdec.bench --target mla-gpt2-medium --draft distilgpt2 \
+  --configs ar_target spec_k2 hspec hspec_k3 --out results/hspec_sweep.jsonl
+python -m specdec.summarize results/hspec_sweep.jsonl
+```
+
+`micro` adds one H-Spec drafter pass ("hspec-drafter", T = block size) to the verifier/draft
+latency grid. `hspec[_k{K}][_t{TEMP}]` runs block drafting with K <= block size (default: the
+block size); its "tokens/iter" is the real τ and "identical to target greedy" the losslessness
+check. The drafter is read from `runs/hspec-drafter/minitorch` (`--hspec-drafter` or
+`HSPEC_DRAFTER_DIR` to change).
+
 ## Preliminary results (2026-11-03, V100-32GB, batch 1, fp32)
 
 Setup: 10 WikiText-2 test prompts × 64 prompt tokens, 64 new tokens each. Target is GPT-2 medium

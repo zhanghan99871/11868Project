@@ -1,0 +1,13 @@
+{"config": "micro", "resident": true, "model": "mla-gpt2-medium", "T": 1, "median_s": 0.09587907599961909}
+{"config": "micro", "resident": true, "model": "mla-gpt2-medium", "T": 2, "median_s": 0.09846361400013848}
+{"config": "micro", "resident": true, "model": "mla-gpt2-medium", "T": 3, "median_s": 0.1064689670001826}
+{"config": "micro", "resident": true, "model": "mla-gpt2-medium", "T": 5, "median_s": 0.11887503699836088}
+{"config": "micro", "resident": true, "model": "mla-gpt2-medium", "T": 7, "median_s": 0.11911368499931996}
+{"config": "micro", "resident": true, "model": "mla-gpt2-medium", "T": 9, "median_s": 0.11956688899954315}
+{"config": "micro", "resident": true, "model": "gpt2", "T": 1, "median_s": 0.04937337800038222}
+{"config": "micro", "resident": true, "model": "gpt2", "T": 2, "median_s": 0.049745131998861325}
+{"config": "micro", "resident": true, "model": "gpt2", "T": 3, "median_s": 0.05358996699942509}
+{"config": "micro", "resident": true, "model": "gpt2", "T": 5, "median_s": 0.054431393000413664}
+{"config": "micro", "resident": true, "model": "gpt2", "T": 7, "median_s": 0.0575856899995415}
+{"config": "micro", "resident": true, "model": "gpt2", "T": 9, "median_s": 0.0570306099998561}
+{"config": "micro", "resident": true, "model": "hspec-drafter", "T": 7, "median_s": 0.032868930999029544}

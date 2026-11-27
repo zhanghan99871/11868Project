@@ -42,7 +42,7 @@ if [ "$DATA" = generated ]; then
     --seq-len 128 \
     --batch-size 16 \
     --anchors-per-seq 48 \
-    --epochs 5 \
+    --epochs 10 \
     --lr 6e-4 \
     --warmup-ratio 0.01 \
     --eval-every 500 \

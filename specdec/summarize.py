@@ -16,14 +16,15 @@ from collections import defaultdict
 
 
 def load(paths):
-    """(rows grouped by "config [draft]" (ar_target alone), micro rows) of bench JSONL files."""
+    """(rows grouped by "config [draft]" (ar_target alone), the micro and memory rows) of bench
+    JSONL files."""
     rows, micro, targets = defaultdict(list), [], set()
     for p in paths:
         for line in open(p):
             if not line.strip():
                 continue
             r = json.loads(line)
-            if r["config"] == "micro":
+            if r["config"] in ("micro", "memory"):
                 micro.append(r)
                 continue
             targets.add(r.get("target", "gpt2-medium"))  # rows before --target existed used gpt2-medium
@@ -92,8 +93,27 @@ def spec_stats(rs, ref):
     return acc, tpi, share, ident
 
 
+def memory_table(memory):
+    """Markdown table of bench `memory` rows: one line per model (the latest measurement)."""
+    latest = {}
+    for r in memory:
+        latest[r["model"], r["role"]] = r
+    mb = 1 / 2**20
+    lines = ["| model | role | parameters | measured GPU (MB) | measured host (MB) | cache per token "
+             "| cache allocated (MB) | reads verifier head |", "|---|---|---|---|---|---|---|---|"]
+    for r in latest.values():
+        dev = "-" if r["device_bytes"] is None else f"{r['device_bytes'] * mb:.0f}"
+        host = "-" if r["host_bytes"] is None else f"{r['host_bytes'] * mb:.0f}"
+        lines.append(f"| {r['model']} | {r['role']} | {r['params'] / 1e6:.1f}M | {dev} | {host} | "
+                     f"{r['cache_bytes_per_token'] / 1024:.1f} KB | {r['cache_bytes_allocated'] * mb:.0f} | "
+                     f"{'yes' if r.get('shares_head') else '-'} |")
+    return "\n".join(lines)
+
+
 def main(paths):
-    rows, micro = load(paths)
+    rows, aux = load(paths)
+    micro = [r for r in aux if r["config"] == "micro"]
+    memory = [r for r in aux if r["config"] == "memory"]
 
     if micro:
         print("| model | new tokens T | forward latency (ms) | vs T=1 |\n|---|---|---|---|")
@@ -101,6 +121,10 @@ def main(paths):
         for r in micro:
             base.setdefault(r["model"], r["median_s"])
             print(f"| {r['model']} | {r['T']} | {r['median_s'] * 1e3:.1f} | {r['median_s'] / base[r['model']]:.2f}x |")
+        print()
+    if memory:
+        print("Memory (bench `memory`: GPU/host bytes measured around loading each model):\n")
+        print(memory_table(memory))
         print()
 
     ar = rows.get("ar_target", [])

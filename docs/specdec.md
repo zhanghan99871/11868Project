@@ -216,6 +216,29 @@ depend on timing:
   H-Spec, generated, k = 7: 3.67 vs 2.41): they average over every start position, while decoding
   starts each step right after a rejection, where disagreements cluster.
 
+**Memory** (`results/memory.md` and `results/figures/memory.png`). `python -m specdec.memory`
+counts parameters and caches exactly from the models' configs; eval.sh runs it on the exports, and
+`results/memory.json` was computed from the trained models' configs. Each bench run of eval.sh also
+records a `memory` row per loaded model (GPU bytes measured around its loading, host bytes, its
+cache), which `specdec.summarize` tabulates and plot.py adds as a third panel. In MiniTorch only
+the matmul weights live on the GPU (embedding tables, LayerNorms and caches stay on the host), so
+the measured GPU numbers are below the totals here. All float32:
+
+| | parameters | weights | own cache per token | reads from the verifier |
+|---|---|---|---|---|
+| MLA verifier | 355.6M | 1,357 MB | 13,056 floats (51 KB); its MHA counterpart: 49,152 | - |
+| distilgpt2 drafter | 81.9M | 312 MB | 9,216 floats (36 KB) | nothing |
+| H-Spec drafter | 95.2M | 363 MB | 0 (a pass holds 26,112 floats for its block) | latent cache, hidden taps, LM head (51.5M) |
+
+- H-Spec has more weights (its 38.6M-parameter token embedding table is 40% of them, and the
+  summary fusion and MLA-shaped attention add 6.0M and 20.6M) but no cache; distilgpt2 adds 36 KB
+  per cached token. At batch 1 and 1,024 tokens distilgpt2 adds 348 MB and H-Spec 363 MB; they
+  are equal at 1,441 cached tokens (batch x context), and beyond that H-Spec adds less (at
+  16 x 1,024 tokens: 888 vs 363 MB).
+- The MiniTorch H-Spec drafter used to upload its own copy of the verifier's LM head (206 MB on
+  the GPU plus a host copy). It now multiplies by the verifier's tensor
+  (`MiniTorchHSpecDrafter.from_verifier`, `shares_head`), so the shared head costs nothing extra.
+
 ## Preliminary results (2026-11-03, V100-32GB, batch 1, fp32)
 
 Setup: 10 WikiText-2 test prompts × 64 prompt tokens, 64 new tokens each. Target is GPT-2 medium

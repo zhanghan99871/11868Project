@@ -12,6 +12,9 @@ Figures (greedy decoding, --temperature to change):
   step_time            verifier and drafter ms per decoding step at each drafter's fastest config
   training             validation tau_greedy (teacher-forced, k = 7) and first-draft top-1 vs epoch
   estimate_vs_measured training-time tau_greedy estimate vs tokens/step measured in decoding
+  memory               weights + caches of each setup at --memory-context tokens, memory each
+                       drafter adds vs cached tokens (batch x context), and the GPU memory bench's
+                       `memory` config measured (from --memory, written by specdec.memory)
 plus ablation.md, the numbers behind the ablation figure.
 
 Speedups divide by the ar_target of the same bench run when the rows have one (specdec.summarize);
@@ -69,6 +72,11 @@ def arguments(argv=None):
     p.add_argument("--acceptance-k", type=int, default=5, help="draft length of the acceptance figure")
     p.add_argument("--block-size", type=int, default=7, help="k of the H-Spec config 'hspec' (no _k)")
     p.add_argument("--format", default="png", choices=["png", "pdf", "svg"])
+    p.add_argument("--memory", default=os.path.join(ROOT, "results", "memory.json"),
+                   help="specdec.memory output (parameters and caches of the verifier and drafters)")
+    p.add_argument("--memory-context", type=int, default=1024, help="cached tokens for the memory bars")
+    p.add_argument("--memory-max-tokens", type=int, default=16384,
+                   help="x range of the added-memory panel (batch x context)")
     args = p.parse_args(argv)
     runs = dict(RUNS)
     for item in args.run:
@@ -453,6 +461,94 @@ def plot_estimate_vs_measured(plt, series, histories, out, fmt, slot_of):
     return save(fig, out, "estimate_vs_measured", fmt)
 
 
+def arch_of(name, model):
+    """Architecture name of a specdec.memory entry (its label, else its kind)."""
+    if name in ARCH_COLOR:
+        return name
+    return {"gpt2": "distilgpt2", "hspec": "H-Spec"}.get(model.get("kind"), describe(name)[0])
+
+
+def plot_memory(plt, memory, measured, context, max_tokens, out, fmt):
+    """Analytic memory (specdec.memory) of the verifier with each drafter; measured GPU memory of
+    the loaded models when bench's `memory` rows are given."""
+    from matplotlib.patches import Patch
+    from specdec import memory as mem
+    mb = 1 / 2**20
+    bpf = memory.get("bytes_per_float", mem.BYTES_PER_FLOAT)
+    v, drafters = memory["verifier"], memory["drafters"]
+    measured_models = {}
+    for r in measured:
+        measured_models[r["model"], r["role"]] = r  # latest measurement per model
+    panels = 3 if any(r["device_bytes"] is not None for r in measured_models.values()) else 2
+    fig, axes = plt.subplots(1, panels, figsize=(5.2 * panels, 3.9),
+                             gridspec_kw={"width_ratios": [1.25, 1, 0.8][:panels]})
+    ax1, ax2 = axes[0], axes[1]
+
+    # (a) persistent memory per setup: verifier weights + cache, drafter weights + cache
+    setups = [("verifier alone", None, None)] + [(f"+ {n}", n, d) for n, d in drafters.items()]
+    ys = list(range(len(setups)))[::-1]
+    for y, (name, dname, d) in zip(ys, setups):
+        parts = [(bpf * v["params"] * mb, INK_2, 0.35, None), (bpf * v["cache_floats_per_token"] * context * mb, INK_2, 0.6, None)]
+        if d:
+            color = ARCH_COLOR.get(arch_of(dname, d), SLOTS[2])
+            parts += [(bpf * d["params"] * mb, color, 1.0, None),
+                      (bpf * d["cache_floats_per_token"] * context * mb, color, 0.45, "////")]
+        left = 0.0
+        for width, color, alpha, hatch in parts:
+            if width > 0:
+                ax1.barh(y, width, 0.6, left=left, color=color, alpha=alpha, hatch=hatch, edgecolor=SURFACE,
+                         linewidth=0.8, zorder=3)
+            left += width
+        ax1.text(left + 15, y, f"{left:,.0f} MB", va="center", fontsize=8, color=INK)
+    ax1.set_yticks(ys, [s[0] for s in setups])
+    ax1.grid(axis="x")
+    ax1.grid(axis="y", visible=False)
+    ax1.set_xlim(0, max(mem.total_bytes(v, d, context) for _, _, d in setups) * mb * 1.25)
+    ax1.set(title=f"One sequence, {context:,} cached tokens", xlabel="MB (float32)")
+    ax1.legend(handles=[Patch(facecolor=INK_2, alpha=0.35, label="verifier weights"),
+                        Patch(facecolor=INK_2, alpha=0.6, label="verifier MLA latent cache"),
+                        Patch(facecolor=INK_2, label="drafter weights (color)"),
+                        Patch(facecolor=SURFACE, edgecolor=INK_2, hatch="////", label="drafter's own cache")],
+               loc="upper center", bbox_to_anchor=(0.45, -0.2), ncol=2, fontsize=7.5)
+
+    # (b) memory a drafter adds vs cached tokens
+    xs = [0, max_tokens]
+    for name, d in drafters.items():
+        color = ARCH_COLOR.get(arch_of(name, d), SLOTS[2])
+        ys_b = [mem.drafter_bytes(d, t) * mb for t in xs]
+        ax2.plot(xs, ys_b, color=color, linewidth=1.8, label=f"{name} ({d['cache_floats_per_token'] * bpf / 1024:.0f} KB/token)")
+    names = list(drafters)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            x = mem.crossover_tokens(drafters[a], drafters[b])
+            if x is not None and 0 < x < max_tokens:
+                y = mem.drafter_bytes(drafters[a], x) * mb
+                ax2.plot([x], [y], marker="o", color=INK, markersize=5, zorder=4)
+                ax2.annotate(f"equal at {x:,.0f} tokens", (x, y), textcoords="offset points", xytext=(8, -14),
+                             fontsize=7.5, color=INK_2)
+    ax2.set(title="Memory added by the drafter", xlabel="cached tokens (batch x context)", ylabel="MB (float32)",
+            xlim=(0, max_tokens))
+    ax2.set_ylim(0, ax2.get_ylim()[1] * 1.05)
+    ax2.legend(loc="upper left", fontsize=7.5)
+
+    # (c) measured GPU memory of each loaded model's resident weights
+    if panels == 3:
+        ax3 = axes[2]
+        items = [(name, r) for (name, role), r in measured_models.items() if r["device_bytes"] is not None]
+        items.sort(key=lambda it: (it[1]["role"] != "verifier", it[0]))
+        for i, (name, r) in enumerate(items):
+            arch = "verifier" if r["role"] == "verifier" else arch_of(name, {"kind": r["kind"]})
+            color = INK_2 if arch == "verifier" else ARCH_COLOR.get(arch, SLOTS[2])
+            ax3.bar(i, r["device_bytes"] * mb, 0.6, color=color, alpha=0.35 if arch == "verifier" else 1.0, zorder=3)
+            ax3.text(i, r["device_bytes"] * mb, f"{r['device_bytes'] * mb:,.0f}", ha="center", va="bottom", fontsize=8)
+        ax3.set_xticks(range(len(items)), ["verifier" if r["role"] == "verifier" else n for n, r in items],
+                       rotation=20, ha="right")
+        ax3.set(title="Measured GPU memory (MiniTorch)", ylabel="MB")
+        ax3.set_ylim(0, ax3.get_ylim()[1] * 1.12)
+    fig.tight_layout()
+    return save(fig, out, "memory", fmt)
+
+
 def write_table(table, ablation_k, warning, out):
     lines = ["| drafter | training data | fastest config | speedup | same-run baseline | tokens/step there "
              f"| tokens/step at k={ablation_k} | training τ estimate (k) |", "|---|---|---|---|---|---|---|---|"]
@@ -499,6 +595,14 @@ def main(argv=None):
         plot_estimate_vs_measured(plt, series, histories, args.out, args.format, slot_of),
         write_table(table, args.ablation_k, warning, args.out),
     ]
+    if os.path.isfile(args.memory):
+        with open(args.memory) as f:
+            memory = json.load(f)
+        measured = [r for r in summarize.load(args.results)[1] if r["config"] == "memory"]
+        written.append(plot_memory(plt, memory, measured, args.memory_context, args.memory_max_tokens,
+                                   args.out, args.format))
+    else:
+        print(f"no {args.memory} (python -m specdec.memory): memory figure skipped")
     return [w for w in written if w]
 
 

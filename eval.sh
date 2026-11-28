@@ -23,8 +23,9 @@
 # the distilgpt2 drafters' best/ loads as is); every config decodes the same $N_PROMPTS WikiText-2 prompts with the MiniTorch MLA
 # verifier: each fine-tuned drafter at several draft lengths and, with REFERENCE=1, pretrained
 # distilgpt2 (no fine-tuning), each bench run with its own ar_target baseline (speedups divide by
-# the same run's). Rows go to $RESULTS (labelled by drafter); the tables to $SUMMARY, the figures
-# (plot.py) to $FIGURES. Needs a GPU, the verifier trained by torch_train/train.py and the
+# the same run's) and the memory its models hold (bench `memory`). Rows go to $RESULTS (labelled by
+# drafter); the tables to $SUMMARY; parameters and caches from the model configs to $MEMORY and
+# .md (specdec.memory); the figures (plot.py) to $FIGURES. Needs a GPU, the verifier trained by torch_train/train.py and the
 # compiled MiniTorch kernels (compile_cuda.sh).
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -43,6 +44,7 @@ HSPEC_LR=${HSPEC_LR:-6e-4}
 RESULTS=${RESULTS:-results/eval.jsonl}
 SUMMARY=${SUMMARY:-results/eval.md}
 FIGURES=${FIGURES:-results/figures}
+MEMORY=${MEMORY:-results/memory.json}
 N_PROMPTS=${N_PROMPTS:-10}
 DISTIL_CONFIGS=${DISTIL_CONFIGS:-spec_k2 spec_k3 spec_k4 spec_k5}
 HSPEC_CONFIGS=${HSPEC_CONFIGS:-hspec_k3 hspec_k5 hspec}
@@ -172,24 +174,27 @@ if stage bench; then
   # each run times its own ar_target baseline, so every speedup is measured under one set of conditions
   if [ "$REFERENCE" = 1 ]; then
     # shellcheck disable=SC2046  # word-split the config list
-    run "${BENCH[@]}" --draft distilgpt2 --draft-label distilgpt2-pretrained --configs ar_target $(with_temps $DISTIL_CONFIGS)
+    run "${BENCH[@]}" --draft distilgpt2 --draft-label distilgpt2-pretrained --configs ar_target memory $(with_temps $DISTIL_CONFIGS)
   fi
   # shellcheck disable=SC2046
-  run "${BENCH[@]}" --draft-dir "$DISTIL_WIKI/best" --draft-label distil-wikitext --configs ar_target $(with_temps $DISTIL_CONFIGS)
+  run "${BENCH[@]}" --draft-dir "$DISTIL_WIKI/best" --draft-label distil-wikitext --configs ar_target memory $(with_temps $DISTIL_CONFIGS)
   # shellcheck disable=SC2046
-  run "${BENCH[@]}" --draft-dir "$DISTIL_GEN/best" --draft-label distil-gen --configs ar_target $(with_temps $DISTIL_CONFIGS)
+  run "${BENCH[@]}" --draft-dir "$DISTIL_GEN/best" --draft-label distil-gen --configs ar_target memory $(with_temps $DISTIL_CONFIGS)
   # shellcheck disable=SC2046
-  run "${BENCH[@]}" --hspec-drafter "$HSPEC_WIKI/minitorch" --hspec-label hspec-wikitext --configs ar_target $(with_temps $HSPEC_CONFIGS)
+  run "${BENCH[@]}" --hspec-drafter "$HSPEC_WIKI/minitorch" --hspec-label hspec-wikitext --configs ar_target memory $(with_temps $HSPEC_CONFIGS)
   # shellcheck disable=SC2046
-  run "${BENCH[@]}" --hspec-drafter "$HSPEC_GEN/minitorch" --hspec-label hspec-gen --configs ar_target $(with_temps $HSPEC_CONFIGS)
+  run "${BENCH[@]}" --hspec-drafter "$HSPEC_GEN/minitorch" --hspec-label hspec-gen --configs ar_target memory $(with_temps $HSPEC_CONFIGS)
 
+  # exact parameters and caches of the verifier and both drafter architectures, from their configs
+  run python -m specdec.memory --verifier-dir "$VERIFIER_EXPORT" --draft-dir distilgpt2="$DISTIL_GEN/best" \
+    --hspec-drafter H-Spec="$HSPEC_GEN/minitorch" --out "$MEMORY"
   if [ "$DRY_RUN" = 1 ]; then
     run python -m specdec.summarize "$RESULTS"
   else
     python -m specdec.summarize "$RESULTS" | tee "$SUMMARY"
     echo "summary written to $SUMMARY"
   fi
-  run python plot.py --results "$RESULTS" --out "$FIGURES" \
+  run python plot.py --results "$RESULTS" --out "$FIGURES" --memory "$MEMORY" \
     --run distil-wikitext="$DISTIL_WIKI" --run distil-gen="$DISTIL_GEN" \
     --run hspec-wikitext="$HSPEC_WIKI" --run hspec-gen="$HSPEC_GEN"
 fi

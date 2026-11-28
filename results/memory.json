@@ -1,0 +1,31 @@
+{
+  "bytes_per_float": 4,
+  "verifier": {
+    "kind": "mla-verifier",
+    "params": 355634944,
+    "shared_params": 0,
+    "cache_floats_per_token": 13056,
+    "mha_cache_floats_per_token": 49152,
+    "transient_floats_per_pass": 0,
+    "n_layer": 24
+  },
+  "drafters": {
+    "distilgpt2": {
+      "kind": "gpt2",
+      "params": 81912576,
+      "shared_params": 0,
+      "cache_floats_per_token": 9216,
+      "transient_floats_per_pass": 0,
+      "n_layer": 6
+    },
+    "H-Spec": {
+      "kind": "hspec",
+      "params": 95189952,
+      "shared_params": 51463168,
+      "cache_floats_per_token": 0,
+      "transient_floats_per_pass": 26112,
+      "n_layer": 6,
+      "block_size": 7
+    }
+  }
+}

@@ -26,8 +26,12 @@ config names:
   spec_k{K}[_t{TEMP}]              classic speculative decoding, K drafts per step
   hspec[_k{K}][_t{TEMP}]           H-Spec block drafting, K <= block size (default: block size)
   micro                            forward latency vs new tokens (+ one H-Spec drafter pass)
+  memory                           memory each loaded model holds: GPU bytes of its resident weights
+                                   (measured around loading), host bytes, parameters and its cache
+                                   (specdec.memory has the exact accounting from configs)
 """
 import argparse
+import gc
 import json
 import os
 import re
@@ -46,8 +50,11 @@ HSPEC = re.compile(r"hspec(?:_k(\d+))?(?:_t([\d.]+))?")
 HSPEC_NAME = "hspec"  # default "draft" label of H-Spec rows (--hspec-label)
 
 
+AUX = ("micro", "memory")  # configs that do not decode
+
+
 def is_config(cfg):
-    return cfg in ("ar_target", "ar_draft", "micro") or bool(SPEC.fullmatch(cfg) or HSPEC.fullmatch(cfg))
+    return cfg in ("ar_target", "ar_draft") + AUX or bool(SPEC.fullmatch(cfg) or HSPEC.fullmatch(cfg))
 
 
 def row_key(config, target, draft):
@@ -64,8 +71,11 @@ def done_configs(path, n_prompts):
                 if not line.strip():
                     continue
                 r = json.loads(line)
-                if r["config"] != "micro":
-                    seen[row_key(r["config"], r.get("target", "gpt2-medium"), r.get("draft"))].add(r["prompt"])
+                key = row_key(r["config"], r.get("target", "gpt2-medium"), r.get("draft"))
+                if r["config"] == "memory":
+                    seen[key] = set(range(n_prompts))  # measured once per drafter
+                elif r["config"] != "micro":
+                    seen[key].add(r["prompt"])
     return {key for key, got in seen.items() if set(range(n_prompts)) <= got}
 
 
@@ -81,14 +91,83 @@ def draft_label(draft, draft_dir=None):
     return name
 
 
-def todo_configs(configs, done, target, label, hspec_label):
+def loads_classic_draft(configs, draft_dir=None):
+    """Whether a run of `configs` loads the classic draft model (memory alone measures the
+    --draft-dir drafter, or else the H-Spec drafter)."""
+    wants_hspec = any(HSPEC.fullmatch(c) for c in configs)
+    return (any(c in ("ar_draft", "micro") or SPEC.fullmatch(c) for c in configs)
+            or ("memory" in configs and not wants_hspec and draft_dir is not None))
+
+
+def todo_configs(configs, done, target, label, hspec_label, mem_label=None):
     """The configs of `configs` that are not in `done` (done_configs). ar_target counts as done only
-    when every other config is, so new rows always come with a same-run baseline."""
+    when every other decoding config is, so new rows always come with a same-run baseline. Memory
+    rows carry `mem_label` (default: the classic label if the run loads a classic drafter, else the
+    H-Spec label)."""
+    if mem_label is None:
+        mem_label = label if loads_classic_draft(configs) else hspec_label
+
     def key(c):
-        return row_key(c, target, hspec_label if HSPEC.fullmatch(c) else label)
+        return row_key(c, target, hspec_label if HSPEC.fullmatch(c) else mem_label if c == "memory" else label)
 
     rest = [c for c in configs if c != "ar_target" and (c == "micro" or key(c) not in done)]
-    return [c for c in configs if c in rest or (c == "ar_target" and (rest or key(c) not in done))]
+    decoding = [c for c in rest if c not in AUX]
+    return [c for c in configs if c in rest or (c == "ar_target" and (decoding or key(c) not in done))]
+
+
+def memory_in_use():
+    """(GPU bytes in use on the device or None without CUDA, this process's resident host bytes)."""
+    gc.collect()
+    device = None
+    try:
+        import pycuda.driver as cuda
+        free, total = cuda.mem_get_info()
+        device = total - free
+    except Exception:  # no pycuda, no context, no GPU
+        pass
+    try:
+        with open("/proc/self/statm") as f:
+            host = int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        import resource
+        host = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+    return device, host
+
+
+def cache_bytes(cache):
+    """(bytes allocated, bytes per cached token) of a verifier or draft-model cache."""
+    allocated = sum(a.nbytes for a in vars(cache).values() if isinstance(a, np.ndarray))
+    return allocated, allocated // cache.max_len
+
+
+def model_memory(model):
+    """specdec.memory accounting of a loaded MiniTorch model."""
+    from . import memory
+    if hasattr(model, "draft_logits"):
+        return memory.hspec_drafter(model.cfg)
+    if hasattr(model, "cfg"):
+        return memory.mla_verifier(model.cfg)
+    return memory.gpt2_drafter({"n_layer": model.n_layer, "n_embd": model.n_embd, "vocab_size": model.vocab_size,
+                                "n_positions": model.wpe.shape[0]})
+
+
+def memory_rows(loaded, measured, label, target_name, extra=None):
+    """One row per loaded model: device/host bytes measured around its loading (None if not
+    measured), parameters and its cache. `loaded`: [(name, role, model)]."""
+    rows = []
+    for name, role, model in loaded:
+        acct = model_memory(model)
+        device, host = measured.get(name, (None, None))
+        allocated, per_token = cache_bytes(model.new_cache()) if hasattr(model, "new_cache") else (0, 0)
+        rows.append({"config": "memory", "target": target_name, "draft": label, "model": name, "role": role,
+                     "kind": acct["kind"], "params": acct["params"], "shared_params": acct["shared_params"],
+                     "shares_head": bool(getattr(model, "shares_head", False)), "resident": model.resident,
+                     "device_bytes": device, "host_bytes": host, "cache_bytes_allocated": allocated,
+                     "cache_bytes_per_token": per_token, **(extra or {})})
+        print(f"memory {name} ({role}): {acct['params'] / 1e6:.1f}M params, device "
+              f"{'-' if device is None else f'{device / 2**20:.0f} MB'}, host {'-' if host is None else f'{host / 2**20:.0f} MB'}, "
+              f"cache {per_token / 1024:.1f} KB/token", flush=True)
+    return rows
 
 
 def run_config(cfg, target, draft, prompts, n_new, seed, draft_name, target_name="gpt2-medium", hspec=None,
@@ -195,12 +274,15 @@ def main(argv=None):
         if not is_config(cfg):
             ap.error(f"unknown config {cfg!r}")
     label = args.draft_label or draft_label(args.draft, args.draft_dir)
+    wants_draft = loads_classic_draft(args.configs, args.draft_dir)  # decided on all requested configs
+    mem_label = label if wants_draft else args.hspec_label
     if args.skip_done:
-        todo = todo_configs(args.configs, done_configs(args.out, args.n_prompts), args.target, label, args.hspec_label)
+        todo = todo_configs(args.configs, done_configs(args.out, args.n_prompts), args.target, label, args.hspec_label,
+                            mem_label)
         for c in args.configs:
             if c not in todo:
-                print(f"{c} [{args.hspec_label if HSPEC.fullmatch(c) else label}]: already in {args.out}, skipped",
-                      flush=True)
+                shown = args.hspec_label if HSPEC.fullmatch(c) else mem_label if c == "memory" else label
+                print(f"{c} [{shown}]: already in {args.out}, skipped", flush=True)
         if not todo:
             return
         args.configs = todo
@@ -212,19 +294,32 @@ def main(argv=None):
     wants_hspec = any(HSPEC.fullmatch(c) for c in args.configs)
     if wants_hspec and args.target != common.MLA_VERIFIER:
         ap.error(f"hspec configs need --target {common.MLA_VERIFIER}")
-    wants_draft = any(c in ("ar_draft", "micro") or SPEC.fullmatch(c) for c in args.configs)
+    wants_memory = "memory" in args.configs
+    measured = {}
 
-    target = common.load(args.target, resident=resident)
+    def timed_load(name, load):
+        before = memory_in_use() if wants_memory else None
+        model = load()
+        if wants_memory:
+            after = memory_in_use()
+            measured[name] = tuple(None if a is None or b is None else a - b for a, b in zip(after, before))
+        return model
+
+    if wants_memory:
+        common.backend()  # create the CUDA context first, so it is not counted as the verifier's
+    target = timed_load(args.target, lambda: common.load(args.target, resident=resident))
     draft = None
     if wants_draft:
-        draft = (common.load_gpt2_dir(args.draft_dir, resident=resident) if args.draft_dir
-                 else common.load(args.draft, resident=resident))
+        draft = timed_load(label, lambda: common.load_gpt2_dir(args.draft_dir, resident=resident) if args.draft_dir
+                           else common.load(args.draft, resident=resident))
     hspec = None
-    if args.target == common.MLA_VERIFIER and (wants_hspec or "micro" in args.configs):
+    if args.target == common.MLA_VERIFIER and (wants_hspec or "micro" in args.configs
+                                               or (wants_memory and draft is None)):
         if wants_hspec or os.path.isfile(os.path.join(args.hspec_drafter, "config.json")):
-            hspec = common.load_hspec_drafter(target, args.hspec_drafter, resident=resident)
+            hspec = timed_load(args.hspec_label, lambda: common.load_hspec_drafter(target, args.hspec_drafter,
+                                                                                    resident=resident))
         else:
-            print(f"no H-Spec drafter at {args.hspec_drafter}; micro skips it", flush=True)
+            print(f"no H-Spec drafter at {args.hspec_drafter}; micro/memory skip it", flush=True)
     autoregressive(target, prompts[0], 4)  # warm up CUDA context / allocator
     if draft is not None:
         autoregressive(draft, prompts[0], 4)
@@ -237,6 +332,14 @@ def main(argv=None):
     for cfg in args.configs:
         if cfg == "micro":
             micro(target, draft, prompts[0], args.out, label, args.target, hspec, extra=extra)
+            continue
+        if cfg == "memory":
+            loaded = [(args.target, "verifier", target)]
+            loaded += [(label, "drafter", draft)] if draft is not None else []
+            loaded += [(args.hspec_label, "drafter", hspec)] if hspec is not None else []
+            with open(args.out, "a") as f:
+                for r in memory_rows(loaded, measured, mem_label, args.target, extra):
+                    f.write(json.dumps(r) + "\n")
             continue
         rows = run_config(cfg, target, draft, prompts, args.n_new, args.seed, label, args.target, hspec,
                           hspec_name=args.hspec_label, extra=extra)

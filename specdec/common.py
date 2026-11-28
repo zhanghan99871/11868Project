@@ -95,8 +95,10 @@ def load_hspec_drafter(target, drafter_dir=None, resident=True):
     if project not in sys.path:
         sys.path.insert(0, project)
     from minitorch_drafter import MiniTorchHSpecDrafter
-    return MiniTorchHSpecDrafter.from_verifier(drafter_dir or HSPEC_DRAFTER_DIR, target, backend=backend(),
-                                               resident=resident)
+    # the verifier's backend, so the drafter can read the verifier's LM head in place
+    shared = getattr(getattr(target, "ops", None), "backend", None)
+    return MiniTorchHSpecDrafter.from_verifier(drafter_dir or HSPEC_DRAFTER_DIR, target,
+                                               backend=shared or backend(), resident=resident)
 
 
 def prompts(n=None):

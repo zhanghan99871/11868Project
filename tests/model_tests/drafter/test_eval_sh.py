@@ -237,9 +237,10 @@ def test_eval_sh_benchmarks_every_drafter_once(tmp_path):
     benches = [bench.parser().parse_args(c[3:]) for c in commands if c[:3] == ["python", "-m", "specdec.bench"]]
     assert all(b.target == "mla-gpt2-medium" and b.skip_done and b.n_prompts == 7 and b.out == str(tmp_path / "eval.jsonl")
                and (b.prompt_len, b.n_new) == (64, 64) for b in benches)
-    assert len(benches) == 5 and all(b.configs[0] == "ar_target" for b in benches)  # a same-run baseline each
+    # each run: a same-run baseline and the memory its models hold
+    assert len(benches) == 5 and all(b.configs[:2] == ["ar_target", "memory"] for b in benches)
     for b in benches:
-        b.configs = b.configs[1:]
+        b.configs = b.configs[2:]
     classic = {b.draft_label: b for b in benches if b.configs[0].startswith("spec")}
     hspec = {b.hspec_label: b for b in benches if b.configs[0].startswith("hspec")}
     assert set(classic) == {"distilgpt2-pretrained", "distil-wikitext", "distil-gen"}
@@ -255,11 +256,15 @@ def test_eval_sh_benchmarks_every_drafter_once(tmp_path):
     for b in hspec.values():
         assert b.configs == ["hspec_k3", "hspec_k3_t1.0", "hspec_k5", "hspec_k5_t1.0", "hspec", "hspec_t1.0"]
     assert all(bench.is_config(c) for b in benches for c in b.configs)
+    assert commands[-3][:3] == ["python", "-m", "specdec.memory"]
+    assert commands[-3][3:] == ["--verifier-dir", paths["VERIFIER_EXPORT"], "--draft-dir",
+                                f"distilgpt2={paths['DISTIL_GEN']}/best", "--hspec-drafter",
+                                f"H-Spec={paths['HSPEC_GEN']}/minitorch", "--out", "results/memory.json"]
     assert commands[-2] == ["python", "-m", "specdec.summarize", str(tmp_path / "eval.jsonl")]
     import plot
     figures = plot.arguments(commands[-1][2:])
     assert commands[-1][1] == "plot.py" and figures.results == [str(tmp_path / "eval.jsonl")]
-    assert figures.out == "results/figures"
+    assert figures.out == "results/figures" and figures.memory == "results/memory.json"
     assert {label: figures.runs[label] for label in plot.RUNS} == {
         "distil-wikitext": paths["DISTIL_WIKI"], "distil-gen": paths["DISTIL_GEN"],
         "hspec-wikitext": paths["HSPEC_WIKI"], "hspec-gen": paths["HSPEC_GEN"]}

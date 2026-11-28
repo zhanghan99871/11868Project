@@ -97,8 +97,10 @@ def expected_shapes(cfg: DrafterConfig) -> dict:
 
 
 class MiniTorchHSpecDrafter:
-    def __init__(self, model_dir, target_head: np.ndarray, backend=None, resident=True):
-        """target_head: the verifier's LM head weight [n_vocab, target_n_embd]."""
+    def __init__(self, model_dir, target_head: np.ndarray, backend=None, resident=True, shared_head=None):
+        """target_head: the verifier's LM head weight [n_vocab, target_n_embd]. shared_head: the
+        verifier's own prepared head ([target_n_embd, n_vocab], same kind of ops) to use instead of
+        a copy, so the drafter adds no memory for it (from_verifier passes it)."""
         from safetensors.numpy import load_file
 
         with open(os.path.join(model_dir, "config.json")) as f:
@@ -110,12 +112,16 @@ class MiniTorchHSpecDrafter:
             raise ValueError(f"target head must be {(cfg.n_vocab, cfg.target_n_embd)}, got {tuple(target_head.shape)}")
         self.resident = backend is not None and resident
         self.ops = make_ops(backend, resident, cfg.ln_eps)
-        self._load(load_file(os.path.join(model_dir, "model.safetensors")), target_head)
+        self._load(load_file(os.path.join(model_dir, "model.safetensors")), target_head, shared_head)
 
     @classmethod
     def from_verifier(cls, model_dir, verifier, backend=None, resident=True):
-        """Drafter for a specdec.mla_model.MiniTorchMLAGPT2 verifier (checks they fit together)."""
-        drafter = cls(model_dir, verifier.head_weight, backend=backend, resident=resident)
+        """Drafter for a specdec.mla_model.MiniTorchMLAGPT2 verifier (checks they fit together). It
+        reads the verifier's LM head in place (no second host or device copy) when both run on the
+        same kind of backend."""
+        same_ops = (backend is None) == (getattr(verifier.ops, "backend", None) is None)
+        drafter = cls(model_dir, verifier.head_weight, backend=backend, resident=resident,
+                      shared_head=verifier.lm_head if same_ops else None)
         cfg, vcfg = drafter.cfg, verifier.cfg
         pairs = {"target_n_embd": vcfg.n_embd, "n_head": vcfg.n_head, "kv_lora_rank": vcfg.kv_lora_rank,
                  "qk_nope_head_dim": vcfg.qk_nope_head_dim, "qk_rope_head_dim": vcfg.qk_rope_head_dim,
@@ -125,7 +131,7 @@ class MiniTorchHSpecDrafter:
             raise ValueError(f"drafter does not fit the verifier: {bad or 'layer index out of range'}")
         return drafter
 
-    def _load(self, w, target_head):
+    def _load(self, w, target_head, shared_head=None):
         cfg, ops = self.cfg, self.ops
         shapes = expected_shapes(cfg)
         missing, unexpected = shapes.keys() - w.keys(), w.keys() - shapes.keys()
@@ -160,7 +166,9 @@ class MiniTorchHSpecDrafter:
                 "fc": linear(p + "ff.linear_in"), "proj": linear(p + "ff.linear_out")})
         self.ln_f = (ops.param(w["ln.weight"]), ops.param(w["ln.bias"]))
         self.head_proj = linear("head_proj")
-        self.head = ops.param(np.asarray(target_head, dtype=np.float32).T, matmul=True)  # [Dt, V]
+        self.shares_head = shared_head is not None
+        self.head = (shared_head if self.shares_head  # [Dt, V]
+                     else ops.param(np.asarray(target_head, dtype=np.float32).T, matmul=True))
 
     def draft_logits(self, anchor: int, prefix_latents: Sequence[Tuple[np.ndarray, np.ndarray]],
                      summary: np.ndarray) -> np.ndarray:

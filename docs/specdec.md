@@ -187,8 +187,9 @@ per-config table plus the fastest config per drafter; `plot.py` draws `results/f
 curves, training estimate vs measured τ, memory) and `ablation.md`.
 
 **Results** (`results/eval_paired.jsonl`, `results/eval_paired.md`, figures in
-`results/figures_paired/`; 10 prompts, greedy, every output identical to the verifier's; each
-speedup against the verifier alone timed in the same bench run):
+`results/figures_paired/`, each explained in [figure.md](figure.md); 10 prompts, greedy, every
+output identical to the verifier's; each speedup against the verifier alone timed in the same
+bench run):
 
 | fastest config (speedup) | WikiText-2 | verifier-generated |
 |---|---|---|

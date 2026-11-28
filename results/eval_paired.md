@@ -40,3 +40,5 @@ Fastest config per drafter:
 | distil-wikitext | 0 | spec_k2 | 10.72 | 1.34x | 0.547 | 2.07 | 10/10 |
 | hspec-wikitext | 0 | hspec_k3 | 14.14 | 1.34x | 0.283 | 1.83 | 10/10 |
 | distilgpt2-pretrained | 0 | spec_k2 | 9.27 | 1.16x | 0.402 | 1.79 | 10/10 |
+
+Note: the verifier alone ran at 94-125 ms per token in different bench runs (distilgpt2-pretrained 125, distil-wikitext 125, distil-gen 125, hspec-wikitext 95, hspec-gen 94); speedups use each run's own baseline and stay comparable, absolute tok/s and ms do not.

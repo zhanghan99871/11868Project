@@ -125,6 +125,21 @@ def test_speedups_use_the_same_run_baseline(tmp_path):
     assert "Warning: verifier ms per call differ" in buf.getvalue()
 
 
+def test_baseline_spread_note(tmp_path):
+    rows = [{**row("ar_target", "a", p, 2.0), "run_id": "slow"} for p in range(2)]
+    rows += [{**row("spec_k2", "a", p, 1.0), "run_id": "slow"} for p in range(2)]
+    rows += [{**row("ar_target", "b", p, 1.5), "run_id": "fast"} for p in range(2)]
+    rows += [{**row("hspec_k3", "b", p, 0.8), "run_id": "fast"} for p in range(2)]
+    grouped, _ = summarize.load([str(write_rows(tmp_path / "rows.jsonl", rows))])
+    note = summarize.baseline_spread(grouped)
+    assert note and "150-200 ms per token" in note and "a 200" in note and "b 150" in note
+    for r in rows:
+        if r["run_id"] == "fast":
+            r["decode_time"] = 1.9 if r["config"] == "ar_target" else r["decode_time"]
+    grouped, _ = summarize.load([str(write_rows(tmp_path / "rows.jsonl", rows))])
+    assert summarize.baseline_spread(grouped) is None  # within 15%
+
+
 def test_bench_rows_carry_the_run(tmp_path, monkeypatch):
     """bench.main stamps every row with host and run_id (models replaced by a stub)."""
     calls = []

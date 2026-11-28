@@ -184,60 +184,67 @@ same run's `ar_target` (`specdec.summarize`), so a machine that changes speed be
 job, a different node after `STAGES` splits) cannot skew the comparison. `results/eval.md` has the
 per-config table plus the fastest config per drafter; `plot.py` draws `results/figures/`
 (speedup and τ vs k, the 2x2 ablation, acceptance by draft position, time per step, training
-curves, training estimate vs measured τ) and `ablation.md`.
+curves, training estimate vs measured τ, memory) and `ablation.md`.
 
-**First run** (`results/eval.jsonl`, 10 prompts, greedy, all outputs identical to the verifier's;
-figures in `results/figures/`). These rows predate `run_id`, and the timing check flags them: the
-verifier ran at 131-136 ms per call during `ar_target` and the three classic-drafter runs, but at
-102-106 ms during the two H-Spec runs (earlier files: 98-108 ms). The H-Spec speedups in
-`eval.md` (1.79x, 2.31x) divide by the slow baseline and are inflated by about 1.31x. τ does not
-depend on timing:
+**Results** (`results/eval_paired.jsonl`, `results/eval_paired.md`, figures in
+`results/figures_paired/`; 10 prompts, greedy, every output identical to the verifier's; each
+speedup against the verifier alone timed in the same bench run):
+
+| fastest config (speedup) | WikiText-2 | verifier-generated |
+|---|---|---|
+| distilgpt2 (pretrained: k = 2, 1.16x) | k = 2, 1.34x | k = 2, 1.38x |
+| H-Spec | k = 3, 1.34x | k = 7, 1.70x |
 
 | τ (tokens per verifier step) at k = 5 | WikiText-2 | verifier-generated |
 |---|---|---|
 | distilgpt2 (pretrained: 2.04) | 2.59 | 2.87 |
 | H-Spec | 1.83 | 2.37 |
 
-- Training on verifier-generated text helps both drafters and H-Spec far more (+0.54 vs +0.28).
-  The WikiText H-Spec drafter collapses after the second draft (P(draft j | draft j-1) = 0.51,
-  0.47, 0.31, 0.15, 0.00), so its τ is flat at 1.83 for k = 3, 5 and 7; the generated-data drafter
-  keeps 0.55-0.65 at every position.
-- The classic drafter accepts more at equal k (it conditions on its own drafts) but pays one
-  distilgpt2 forward per draft (31 ms here, vs 28 ms for a whole H-Spec block), so its best k is 2
-  while H-Spec's is 5.
-- Speedups within one timing regime: classic 1.18x (pretrained), 1.37x (WikiText), 1.41x
-  (generated), all at k = 2. Rescaling the H-Spec runs by the 1.31x verifier-call ratio gives
-  about 1.37x (WikiText, k = 3) and 1.77x (generated, k = 5); the earlier separate run of the
-  same generated-data drafter measured 1.68x. So on WikiText the two architectures tie, and on
-  verifier-generated text H-Spec is ahead. Re-run the bench (paired baselines) to confirm:
-  `RESULTS=results/eval_paired.jsonl SUMMARY=results/eval_paired.md FIGURES=results/figures_paired
-  STAGES=bench bash eval.sh`.
+- On WikiText-2 the two architectures tie (1.34x); on verifier-generated text H-Spec is ahead
+  (1.70x vs 1.38x). Generated data helps H-Spec far more (+0.54 τ, +0.36x) than distilgpt2
+  (+0.28 τ, +0.04x): the WikiText H-Spec drafter collapses after the second draft
+  (P(draft j | draft j-1) = 0.51, 0.47, 0.31, 0.15, 0.00), so its τ is flat at 1.83 for k = 3, 5
+  and 7, while the generated-data drafter keeps 0.55-0.65 at every position.
+- distilgpt2 accepts more at equal k (it conditions on its own drafts) but pays one forward per
+  draft (31 ms vs 28 ms for a whole H-Spec block), so its best k is 2 and H-Spec's is 5-7.
 - Training-time τ estimates overestimate decoding (distilgpt2, generated, k = 5: 3.82 vs 2.87;
   H-Spec, generated, k = 7: 3.67 vs 2.41): they average over every start position, while decoding
   starts each step right after a rejection, where disagreements cluster.
+- Timing: the verifier alone ran at 125 ms per token in the three distilgpt2 runs and 94-95 ms in
+  the two H-Spec runs (same split in the first, unpaired run, whose H-Spec speedups were inflated
+  to 1.79x and 2.31x). Within each run the ratios are consistent (a verifier call costs 1.03-1.06x
+  a one-token call in both), so the paired speedups compare fairly; absolute tok/s across runs do
+  not. The H-Spec runs came last both times, so the cause may be the machine over time rather than
+  the process; running an H-Spec bench before a distilgpt2 one would tell.
 
-**Memory** (`results/memory.md` and `results/figures/memory.png`). `python -m specdec.memory`
-counts parameters and caches exactly from the models' configs; eval.sh runs it on the exports, and
-`results/memory.json` was computed from the trained models' configs. Each bench run of eval.sh also
-records a `memory` row per loaded model (GPU bytes measured around its loading, host bytes, its
-cache), which `specdec.summarize` tabulates and plot.py adds as a third panel. In MiniTorch only
-the matmul weights live on the GPU (embedding tables, LayerNorms and caches stay on the host), so
-the measured GPU numbers are below the totals here. All float32:
+**Memory** (`results/memory.md`, `results/figures_paired/memory.png`, and the measured table in
+`results/eval_paired.md`). `python -m specdec.memory` counts parameters and caches exactly from
+the models' configs (eval.sh runs it on the exports). Each eval.sh bench run also records a
+`memory` row per loaded model: GPU and host bytes measured around its loading, its parameters and
+cache. All float32:
 
-| | parameters | weights | own cache per token | reads from the verifier |
-|---|---|---|---|---|
-| MLA verifier | 355.6M | 1,357 MB | 13,056 floats (51 KB); its MHA counterpart: 49,152 | - |
-| distilgpt2 drafter | 81.9M | 312 MB | 9,216 floats (36 KB) | nothing |
-| H-Spec drafter | 95.2M | 363 MB | 0 (a pass holds 26,112 floats for its block) | latent cache, hidden taps, LM head (51.5M) |
+| | parameters | weights | own cache per token | reads from the verifier | measured GPU (MiniTorch) |
+|---|---|---|---|---|---|
+| MLA verifier | 355.6M | 1,357 MB | 13,056 floats (51 KB); its MHA counterpart: 49,152 | - | 1,302 MB |
+| distilgpt2 drafter | 81.9M | 312 MB | 9,216 floats (36 KB) | nothing | 340 MB |
+| H-Spec drafter | 95.2M | 363 MB | 0 (a pass holds 26,112 floats for its block) | latent cache, hidden taps, LM head (51.5M) | 220 MB |
 
-- H-Spec has more weights (its 38.6M-parameter token embedding table is 40% of them, and the
-  summary fusion and MLA-shaped attention add 6.0M and 20.6M) but no cache; distilgpt2 adds 36 KB
-  per cached token. At batch 1 and 1,024 tokens distilgpt2 adds 348 MB and H-Spec 363 MB; they
-  are equal at 1,441 cached tokens (batch x context), and beyond that H-Spec adds less (at
+- H-Spec has more weights (its 38.6M-parameter token embedding table is 40% of them; the summary
+  fusion and MLA-shaped attention add 6.0M and 20.6M) but no cache; distilgpt2 adds 36 KB per
+  cached token. At batch 1 and 1,024 tokens distilgpt2 adds 348 MB and H-Spec 363 MB; they are
+  equal at 1,441 cached tokens (batch x context), and beyond that H-Spec adds less (at
   16 x 1,024 tokens: 888 vs 363 MB).
+- On the GPU H-Spec is the smaller one (220 vs 340 MB): MiniTorch keeps embedding tables,
+  LayerNorms and caches on the host and uploads only matmul weights, and H-Spec's largest table is
+  only gathered from, while distilgpt2 needs its own 154 MB output layer on the GPU. The measured
+  values are the uploaded matmul weights plus 30-50 MB of allocation overhead (expected 1,255 /
+  309 / 189 MB).
 - The MiniTorch H-Spec drafter used to upload its own copy of the verifier's LM head (206 MB on
   the GPU plus a host copy). It now multiplies by the verifier's tensor
   (`MiniTorchHSpecDrafter.from_verifier`, `shares_head`), so the shared head costs nothing extra.
+- Not resident: the fused MLA kernel takes `kv_up` from host storage, so every attention call
+  copies it to the GPU (about 100 MB per verifier forward, 25 MB per H-Spec pass). Uploading it
+  once would cost that much GPU memory and save the transfers.
 
 ## Preliminary results (2026-11-03, V100-32GB, batch 1, fp32)
 

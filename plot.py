@@ -374,22 +374,29 @@ def plot_acceptance(plt, series, k, out, fmt, slot_of):
     return save(fig, out, "acceptance", fmt)
 
 
+def ms_per_token(rs):
+    return 1e3 * sum(r["decode_time"] for r in rs) / sum(r["n_new"] for r in rs)
+
+
 def plot_step_time(plt, series, ar, warning, out, fmt):
-    """Per decoding step: verifier ms + drafter ms, at each drafter's fastest config; the verifier
-    alone spends one call per token."""
-    entries = []
+    """Per decoding step: verifier ms + drafter ms, at each drafter's fastest config, next to the
+    verifier alone (one call per token) of the same bench run; without same-run baselines, one bar
+    for all ar_target rows."""
+    entries, paired_all = [], True
     for label, s in series.items():
         k, cfg, rs, _, _ = fastest(s, ar)
+        base, paired = summarize.baseline(rs, ar)
+        paired_all &= paired
         it = sum(r["iterations"] for r in rs)
         entries.append((f"{display(label)} ({cfg})", 1e3 * sum(r["target_time"] for r in rs) / it,
-                        1e3 * sum(r["draft_time"] for r in rs) / it,
-                        1e3 * sum(r["decode_time"] for r in rs) / sum(r["n_new"] for r in rs), label))
-    if ar:
-        entries.append(("verifier alone (ar_target)", summarize.verifier_ms_per_call(ar), 0.0,
-                        1e3 * sum(r["decode_time"] for r in ar) / sum(r["n_new"] for r in ar), None))
+                        1e3 * sum(r["draft_time"] for r in rs) / it, ms_per_token(rs), label,
+                        ms_per_token(base) if paired and base else None))
+    if ar and not paired_all:
+        entries.append(("verifier alone (ar_target)", summarize.verifier_ms_per_call(ar), 0.0, ms_per_token(ar),
+                        None, None))
     fig, ax = plt.subplots(figsize=(10, 0.55 * len(entries) + 1.2))
     ys = list(range(len(entries)))[::-1]
-    for y, (name, verify, draft, per_token, label) in zip(ys, entries):
+    for y, (name, verify, draft, per_token, label, base) in zip(ys, entries):
         color = ARCH_COLOR.get(describe(label)[0], REFERENCE) if label else REFERENCE
         if label and describe(label)[1] == "pretrained":
             color = REFERENCE
@@ -397,12 +404,14 @@ def plot_step_time(plt, series, ar, warning, out, fmt):
         if draft:
             ax.barh(y, draft - 1.0, 0.6, left=verify + 1.0, color=color, zorder=3)  # 1 ms gap between segments
         step = f"{verify:.0f} + {draft:.0f}" if draft else f"{verify:.0f}"
-        ax.text(verify + draft + 3, y, f"{step} ms per step · {per_token:.0f} ms per token", va="center",
-                fontsize=7.5, color=INK)
+        text = f"{step} ms per step · {per_token:.0f} ms per token"
+        if base is not None:
+            text += f" (verifier alone, same run: {base:.0f})"
+        ax.text(verify + draft + 3, y, text, va="center", fontsize=7.5, color=INK)
     ax.set_yticks(ys, [e[0] for e in entries])
     ax.grid(axis="x")
     ax.grid(axis="y", visible=False)
-    ax.set_xlim(0, max(v + d for _, v, d, _, _ in entries) * 1.55)
+    ax.set_xlim(0, max(e[1] + e[2] for e in entries) * 1.8)
     ax.set(title="Time per decoding step: verifier call (gray) + drafting (color)", xlabel="ms per step")
     footnote(fig, warning)
     fig.tight_layout()
@@ -531,25 +540,31 @@ def plot_memory(plt, memory, measured, context, max_tokens, out, fmt):
     ax2.set_ylim(0, ax2.get_ylim()[1] * 1.05)
     ax2.legend(loc="upper left", fontsize=7.5)
 
-    # (c) measured GPU memory of each loaded model's resident weights
+    # (c) measured GPU memory of the resident weights: median per architecture over the bench runs
     if panels == 3:
+        import numpy as np
         ax3 = axes[2]
-        items = [(name, r) for (name, role), r in measured_models.items() if r["device_bytes"] is not None]
-        items.sort(key=lambda it: (it[1]["role"] != "verifier", it[0]))
-        for i, (name, r) in enumerate(items):
-            arch = "verifier" if r["role"] == "verifier" else arch_of(name, {"kind": r["kind"]})
+        by_arch = defaultdict(list)
+        for r in measured:
+            if r["device_bytes"] is not None:
+                arch = "verifier" if r["role"] == "verifier" else arch_of(r["model"], {"kind": r["kind"]})
+                by_arch[arch].append(r["device_bytes"] * mb)
+        names = sorted(by_arch, key=lambda a: (a != "verifier", ARCH_ORDER.index(a) if a in ARCH_ORDER else 9, a))
+        for i, arch in enumerate(names):
+            vals = by_arch[arch]
+            value = float(np.median(vals))
             color = INK_2 if arch == "verifier" else ARCH_COLOR.get(arch, SLOTS[2])
-            ax3.bar(i, r["device_bytes"] * mb, 0.6, color=color, alpha=0.35 if arch == "verifier" else 1.0, zorder=3)
-            ax3.text(i, r["device_bytes"] * mb, f"{r['device_bytes'] * mb:,.0f}", ha="center", va="bottom", fontsize=8)
-        ax3.set_xticks(range(len(items)), ["verifier" if r["role"] == "verifier" else n for n, r in items],
-                       rotation=20, ha="right")
-        ax3.set(title="Measured GPU memory (MiniTorch)", ylabel="MB")
-        ax3.set_ylim(0, ax3.get_ylim()[1] * 1.12)
+            ax3.bar(i, value, 0.6, color=color, alpha=0.35 if arch == "verifier" else 1.0, zorder=3)
+            spread = f"\n({min(vals):,.0f}-{max(vals):,.0f})" if max(vals) - min(vals) >= 1 else ""
+            ax3.text(i, value, f"{value:,.0f}{spread}", ha="center", va="bottom", fontsize=8, linespacing=1.1)
+        ax3.set_xticks(range(len(names)), names)
+        ax3.set(title="Measured GPU memory (MiniTorch)", ylabel="MB, median over runs")
+        ax3.set_ylim(0, ax3.get_ylim()[1] * 1.15)
     fig.tight_layout()
     return save(fig, out, "memory", fmt)
 
 
-def write_table(table, ablation_k, warning, out):
+def write_table(table, ablation_k, warning, out, note=None):
     lines = ["| drafter | training data | fastest config | speedup | same-run baseline | tokens/step there "
              f"| tokens/step at k={ablation_k} | training τ estimate (k) |", "|---|---|---|---|---|---|---|---|"]
     for t in table:
@@ -560,6 +575,8 @@ def write_table(table, ablation_k, warning, out):
                      f"| {t['tau']:.2f} | {at_k} | {est} |")
     if warning:
         lines += ["", f"Warning: {warning}."]
+    if note:
+        lines += ["", f"Note: {note}."]
     path = os.path.join(out, "ablation.md")
     with open(path, "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -593,7 +610,7 @@ def main(argv=None):
         plot_step_time(plt, series, ar, warning, args.out, args.format),
         plot_training(plt, histories, args.out, args.format, slot_of),
         plot_estimate_vs_measured(plt, series, histories, args.out, args.format, slot_of),
-        write_table(table, args.ablation_k, warning, args.out),
+        write_table(table, args.ablation_k, warning, args.out, summarize.baseline_spread(rows)),
     ]
     if os.path.isfile(args.memory):
         with open(args.memory) as f:

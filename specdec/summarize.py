@@ -83,6 +83,29 @@ def timing_check(rows, tolerance=0.15):
             "comparable (re-run them with a paired ar_target; acceptance and tokens/iter are unaffected)")
 
 
+def baseline_spread(rows, tolerance=0.15):
+    """Note text if the same-run ar_target baselines ran at clearly different speeds, else None.
+    Paired speedups stay comparable, but absolute tok/s and ms are not."""
+    per_run = defaultdict(list)
+    for r in rows.get("ar_target", []):
+        if r.get("run_id"):
+            per_run[r["run_id"]].append(r)
+    if len(per_run) < 2:
+        return None
+    ms = {run: 1e3 * sum(r["decode_time"] for r in rs) / sum(r["n_new"] for r in rs) for run, rs in per_run.items()}
+    if max(ms.values()) <= (1 + tolerance) * min(ms.values()):
+        return None
+    drafts = defaultdict(set)
+    for rs in rows.values():
+        for r in rs:
+            if r["config"] != "ar_target" and r.get("run_id") in ms:
+                drafts[r["run_id"]].add(r.get("draft", "gpt2"))
+    listing = ", ".join(f"{'/'.join(sorted(drafts[run])) or run} {v:.0f}" for run, v in ms.items())
+    return (f"the verifier alone ran at {min(ms.values()):.0f}-{max(ms.values()):.0f} ms per token in different "
+            f"bench runs ({listing}); speedups use each run's own baseline and stay comparable, absolute "
+            "tok/s and ms do not")
+
+
 def spec_stats(rs, ref):
     """Acceptance, tokens per verifier call, draft time share and greedy identity of one config's rows."""
     acc = sum(r["accepted"] for r in rs) / max(1, sum(r["drafted"] for r in rs))
@@ -164,6 +187,9 @@ def main(paths):
     warning = timing_check(rows)
     if warning:
         print(f"\nWarning: {warning}.")
+    note = baseline_spread(rows)
+    if note:
+        print(f"\nNote: {note}.")
 
 
 if __name__ == "__main__":

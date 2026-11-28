@@ -76,6 +76,7 @@ def test_figures_and_table(tmp_path):
     write_run(tmp_path / "hg", tau=lambda s: 2.0 + s / 100, top1=lambda s: [0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1],
               block_size=7)
     written = plot.main(["--results", str(results), "--out", str(tmp_path / "figs"),
+                         "--memory", str(tmp_path / "no-memory.json"),  # tested in test_memory.py
                          "--run", f"distil-wikitext={tmp_path / 'dw'}", "--run", f"hspec-gen={tmp_path / 'hg'}",
                          "--run", f"distil-gen={tmp_path / 'missing'}", "--run", f"hspec-wikitext={tmp_path / 'missing'}"])
     names = {Path(w).name for w in written}
@@ -106,7 +107,31 @@ def test_unpaired_timing_shift_is_flagged(tmp_path, capsys):
     assert (tmp_path / "figs" / "speedup_tau.svg").is_file()
 
 
-@pytest.mark.skipif(not (ROOT / "results" / "eval.jsonl").is_file(), reason="no committed eval results")
-def test_committed_results_plot(tmp_path):
-    written = plot.main(["--out", str(tmp_path)])
+COMMITTED = sorted((ROOT / "results").glob("eval*.jsonl"))
+
+
+@pytest.mark.skipif(not COMMITTED, reason="no committed eval results")
+@pytest.mark.parametrize("results", COMMITTED, ids=lambda p: p.name)
+def test_committed_results_plot(results, tmp_path):
+    written = plot.main(["--results", str(results), "--out", str(tmp_path)])
     assert {Path(w).stem for w in written} >= set(FIGURES)
+
+
+def test_step_time_shows_each_runs_baseline(tmp_path, monkeypatch):
+    """With same-run baselines the step-time figure labels each drafter with its own run's
+    verifier-alone time and draws no pooled ar_target bar."""
+    rows = synthetic_rows()
+    for r in rows:
+        if r["draft"].startswith("hspec") or (r["config"] == "ar_target" and r["prompt"] == 1):
+            r["run_id"] = "r2"
+    texts = []
+    import matplotlib.axes
+    real = matplotlib.axes.Axes.text
+    monkeypatch.setattr(matplotlib.axes.Axes, "text", lambda self, *a, **k: texts.append(a[2]) or real(self, *a, **k))
+    (tmp_path / "eval.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    plt = plot.setup_matplotlib()
+    rows_by, _ = plot.summarize.load([str(tmp_path / "eval.jsonl")])
+    series = plot.collect(rows_by, 0.0, 7)
+    plot.plot_step_time(plt, series, rows_by["ar_target"], None, str(tmp_path), "png")
+    labels = [t for t in texts if "ms per step" in t]
+    assert len(labels) == 5 and all("verifier alone, same run: 100)" in t for t in labels)

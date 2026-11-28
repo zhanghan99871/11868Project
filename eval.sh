@@ -8,9 +8,9 @@
 # All four start from distilgpt2 and train with the same verifier-teacher loss (0.1 CE + 0.9 TV),
 # AdamW with 1% warmup and cosine decay, batch 16 x 128 tokens, $EPOCHS epochs, on the same data
 # files; only the architecture and the data differ. The H-Spec defaults are the two runs already
-# trained this way (runs/hspec-drafter-a64-lr6e-4-e10, runs/hspec-drafter-gen-s32).
+# trained this way (runs/hspec-drafter-wikitext, runs/hspec-drafter-gen-s32).
 #
-#   bash eval.sh                          # train whatever is missing, then benchmark and summarize
+#   bash eval.sh                          # train whatever is missing, then benchmark, summarize, plot
 #   STAGES=train bash eval.sh             # train only (e.g. one GPU allocation) ...
 #   STAGES=bench bash eval.sh             # ... benchmark later; configs already in $RESULTS are skipped
 #   N_PROMPTS=20 TEMPS=1.0 bash eval.sh   # more prompts; also sample at temperature 1
@@ -21,9 +21,10 @@
 # missing ($OUT/best/ for distilgpt2, $OUT/best.pt for H-Spec; delete it to retrain).
 # Stage bench: exports the verifier and the H-Spec drafters for MiniTorch if needed ($OUT/minitorch;
 # the distilgpt2 drafters' best/ loads as is); every config decodes the same $N_PROMPTS WikiText-2 prompts with the MiniTorch MLA
-# verifier: ar_target (baseline), each fine-tuned drafter at several draft lengths, and, with
-# REFERENCE=1, pretrained distilgpt2 (no fine-tuning). Rows go to $RESULTS (labelled by drafter);
-# the tables to $SUMMARY. Needs a GPU, the verifier trained by torch_train/train.py and the
+# verifier: each fine-tuned drafter at several draft lengths and, with REFERENCE=1, pretrained
+# distilgpt2 (no fine-tuning), each bench run with its own ar_target baseline (speedups divide by
+# the same run's). Rows go to $RESULTS (labelled by drafter); the tables to $SUMMARY, the figures
+# (plot.py) to $FIGURES. Needs a GPU, the verifier trained by torch_train/train.py and the
 # compiled MiniTorch kernels (compile_cuda.sh).
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -41,6 +42,7 @@ DISTIL_LR=${DISTIL_LR:-2e-4}
 HSPEC_LR=${HSPEC_LR:-6e-4}
 RESULTS=${RESULTS:-results/eval.jsonl}
 SUMMARY=${SUMMARY:-results/eval.md}
+FIGURES=${FIGURES:-results/figures}
 N_PROMPTS=${N_PROMPTS:-10}
 DISTIL_CONFIGS=${DISTIL_CONFIGS:-spec_k2 spec_k3 spec_k4 spec_k5}
 HSPEC_CONFIGS=${HSPEC_CONFIGS:-hspec_k3 hspec_k5 hspec}
@@ -167,19 +169,19 @@ if stage bench; then
   fi
   BENCH=(python -m specdec.bench --target mla-gpt2-medium --n-prompts "$N_PROMPTS" --prompt-len 64 --n-new 64
          --out "$RESULTS" --skip-done)
-  run "${BENCH[@]}" --configs ar_target
+  # each run times its own ar_target baseline, so every speedup is measured under one set of conditions
   if [ "$REFERENCE" = 1 ]; then
     # shellcheck disable=SC2046  # word-split the config list
-    run "${BENCH[@]}" --draft distilgpt2 --draft-label distilgpt2-pretrained --configs $(with_temps $DISTIL_CONFIGS)
+    run "${BENCH[@]}" --draft distilgpt2 --draft-label distilgpt2-pretrained --configs ar_target $(with_temps $DISTIL_CONFIGS)
   fi
   # shellcheck disable=SC2046
-  run "${BENCH[@]}" --draft-dir "$DISTIL_WIKI/best" --draft-label distil-wikitext --configs $(with_temps $DISTIL_CONFIGS)
+  run "${BENCH[@]}" --draft-dir "$DISTIL_WIKI/best" --draft-label distil-wikitext --configs ar_target $(with_temps $DISTIL_CONFIGS)
   # shellcheck disable=SC2046
-  run "${BENCH[@]}" --draft-dir "$DISTIL_GEN/best" --draft-label distil-gen --configs $(with_temps $DISTIL_CONFIGS)
+  run "${BENCH[@]}" --draft-dir "$DISTIL_GEN/best" --draft-label distil-gen --configs ar_target $(with_temps $DISTIL_CONFIGS)
   # shellcheck disable=SC2046
-  run "${BENCH[@]}" --hspec-drafter "$HSPEC_WIKI/minitorch" --hspec-label hspec-wikitext --configs $(with_temps $HSPEC_CONFIGS)
+  run "${BENCH[@]}" --hspec-drafter "$HSPEC_WIKI/minitorch" --hspec-label hspec-wikitext --configs ar_target $(with_temps $HSPEC_CONFIGS)
   # shellcheck disable=SC2046
-  run "${BENCH[@]}" --hspec-drafter "$HSPEC_GEN/minitorch" --hspec-label hspec-gen --configs $(with_temps $HSPEC_CONFIGS)
+  run "${BENCH[@]}" --hspec-drafter "$HSPEC_GEN/minitorch" --hspec-label hspec-gen --configs ar_target $(with_temps $HSPEC_CONFIGS)
 
   if [ "$DRY_RUN" = 1 ]; then
     run python -m specdec.summarize "$RESULTS"
@@ -187,4 +189,7 @@ if stage bench; then
     python -m specdec.summarize "$RESULTS" | tee "$SUMMARY"
     echo "summary written to $SUMMARY"
   fi
+  run python plot.py --results "$RESULTS" --out "$FIGURES" \
+    --run distil-wikitext="$DISTIL_WIKI" --run distil-gen="$DISTIL_GEN" \
+    --run hspec-wikitext="$HSPEC_WIKI" --run hspec-gen="$HSPEC_GEN"
 fi

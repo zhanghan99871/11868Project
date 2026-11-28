@@ -13,10 +13,11 @@ Data:
 
 Validation reports the loss, TV, acceptance (1 - TV: the rejection-sampling acceptance probability
 at temperature 1), top-1 agreement with the verifier and tau_greedy[k-1] = 1 + mean accepted drafts
-per step with k drafts under greedy decoding, k = 1..--eval-k. It is teacher-forced on the
-validation tokens, so on verifier-generated rows (the verifier's own greedy continuations) it is
-what decoding those rows would give; train_drafter.py's tau_greedy is the same quantity for an
-H-Spec block.
+per step with k drafts under greedy decoding, k = 1..--eval-k, teacher-forced on the validation
+tokens (train_drafter.py's tau_greedy is the same quantity for an H-Spec block). On
+verifier-generated rows min(run, k) at a start position is exactly what one decoding step from
+there accepts, but the mean is over every position, while decoding starts each step right after a
+rejection, where disagreements cluster: measured tau is lower (eval.sh: 2.87 vs 3.82 at k = 5).
 
 best/ (save_pretrained: config.json + model.safetensors with the tied head, plus
 training_state.json) is written whenever the validation loss improves. specdec loads it directly:

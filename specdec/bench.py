@@ -17,7 +17,10 @@ Usage:
   python -m specdec.bench --target mla-gpt2-medium --draft-dir runs/distil-drafter-gen-s32/best \
       --draft-label distil-gen --configs spec_k3 --out results/eval.jsonl --skip-done
 Rows record the drafter in "draft" (--draft-label / --hspec-label), so several drafters can share
-one file; --skip-done skips configs whose rows for every prompt are already in --out (eval.sh).
+one file, and the bench run in "run_id" (host, start time, random suffix): specdec.summarize divides by
+the ar_target of the same run, so give each run its own ar_target. --skip-done skips configs whose
+rows for every prompt are already in --out (eval.sh); ar_target is re-timed whenever other configs
+still run, so they get a same-run baseline.
 config names:
   ar_target | ar_draft             target / classic draft LM alone
   spec_k{K}[_t{TEMP}]              classic speculative decoding, K drafts per step
@@ -30,6 +33,7 @@ import os
 import re
 import socket
 import time
+import uuid
 from collections import defaultdict
 
 import numpy as np
@@ -77,8 +81,19 @@ def draft_label(draft, draft_dir=None):
     return name
 
 
+def todo_configs(configs, done, target, label, hspec_label):
+    """The configs of `configs` that are not in `done` (done_configs). ar_target counts as done only
+    when every other config is, so new rows always come with a same-run baseline."""
+    def key(c):
+        return row_key(c, target, hspec_label if HSPEC.fullmatch(c) else label)
+
+    rest = [c for c in configs if c != "ar_target" and (c == "micro" or key(c) not in done)]
+    return [c for c in configs if c in rest or (c == "ar_target" and (rest or key(c) not in done))]
+
+
 def run_config(cfg, target, draft, prompts, n_new, seed, draft_name, target_name="gpt2-medium", hspec=None,
-               hspec_name=HSPEC_NAME):
+               hspec_name=HSPEC_NAME, extra=None):
+    """Rows of one config on every prompt; `extra` (e.g. host, run_id) is added to each row."""
     spec, block = SPEC.fullmatch(cfg), HSPEC.fullmatch(cfg)
     if cfg not in ("ar_target", "ar_draft") and not spec and not block:
         raise ValueError(f"unknown config {cfg!r}")
@@ -108,14 +123,14 @@ def run_config(cfg, target, draft, prompts, n_new, seed, draft_name, target_name
             "target_calls": st.target_calls, "draft_calls": st.draft_calls,
             "target_time": st.target_time, "draft_time": st.draft_time,
             "iterations": st.iterations, "drafted": st.drafted, "accepted": st.accepted,
-            "accepted_per_iter": st.accepted_per_iter,
+            "accepted_per_iter": st.accepted_per_iter, **(extra or {}),
         })
         print(f"{cfg} prompt {pi}: decode {rows[-1]['decode_time']:.2f}s "
               f"acc {st.accepted}/{st.drafted}", flush=True)
     return rows
 
 
-def micro(target, draft, ids, out, draft_name, target_name="gpt2-medium", hspec=None):
+def micro(target, draft, ids, out, draft_name, target_name="gpt2-medium", hspec=None, extra=None):
     """Per-call latency of one forward vs number of new tokens (cache already holds the prompt),
     and of one H-Spec drafter pass (block_size tokens) after the prompt."""
     rows = []
@@ -145,7 +160,7 @@ def micro(target, draft, ids, out, draft_name, target_name="gpt2-medium", hspec=
               flush=True)
     with open(out, "a") as f:
         for r in rows:
-            f.write(json.dumps(r) + "\n")
+            f.write(json.dumps({**r, **(extra or {})}) + "\n")
 
 
 def parser():
@@ -181,9 +196,7 @@ def main(argv=None):
             ap.error(f"unknown config {cfg!r}")
     label = args.draft_label or draft_label(args.draft, args.draft_dir)
     if args.skip_done:
-        done = done_configs(args.out, args.n_prompts)
-        todo = [c for c in args.configs
-                if c == "micro" or row_key(c, args.target, args.hspec_label if HSPEC.fullmatch(c) else label) not in done]
+        todo = todo_configs(args.configs, done_configs(args.out, args.n_prompts), args.target, label, args.hspec_label)
         for c in args.configs:
             if c not in todo:
                 print(f"{c} [{args.hspec_label if HSPEC.fullmatch(c) else label}]: already in {args.out}, skipped",
@@ -192,6 +205,8 @@ def main(argv=None):
             return
         args.configs = todo
 
+    host = socket.gethostname()
+    extra = {"host": host, "run_id": f"{host}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"}
     prompts = [p[:args.prompt_len] for p in common.prompts(args.n_prompts)]
     resident = not args.no_resident
     wants_hspec = any(HSPEC.fullmatch(c) for c in args.configs)
@@ -215,16 +230,16 @@ def main(argv=None):
         autoregressive(draft, prompts[0], 4)
     if hspec is not None:
         speculative_block(target, hspec, prompts[0], 4)
-    print(f"host {socket.gethostname()}, {len(prompts)} prompts, resident={resident}, target={args.target}, "
+    print(f"host {host}, run {extra['run_id']}, {len(prompts)} prompts, resident={resident}, target={args.target}, "
           f"draft={label + ' (' + (args.draft_dir or args.draft) + ')' if draft is not None else '-'}, "
           f"hspec={args.hspec_label + ' (' + args.hspec_drafter + ')' if hspec else '-'}", flush=True)
 
     for cfg in args.configs:
         if cfg == "micro":
-            micro(target, draft, prompts[0], args.out, label, args.target, hspec)
+            micro(target, draft, prompts[0], args.out, label, args.target, hspec, extra=extra)
             continue
         rows = run_config(cfg, target, draft, prompts, args.n_new, args.seed, label, args.target, hspec,
-                          hspec_name=args.hspec_label)
+                          hspec_name=args.hspec_label, extra=extra)
         with open(args.out, "a") as f:
             for r in rows:
                 f.write(json.dumps(r) + "\n")

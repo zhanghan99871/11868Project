@@ -152,14 +152,15 @@ Drafter architecture x drafter training data, all against the frozen MLA verifie
 | | WikiText-2 text | verifier-generated text (`data/verifier_gen_s32`) |
 |---|---|---|
 | distilgpt2, classic autoregressive drafter | `runs/distil-drafter-wikitext` | `runs/distil-drafter-gen-s32` |
-| H-Spec block drafter | `runs/hspec-drafter-a64-lr6e-4-e10` | `runs/hspec-drafter-gen-s32` |
+| H-Spec block drafter | `runs/hspec-drafter-wikitext` | `runs/hspec-drafter-gen-s32` |
 
 All four start from distilgpt2 and use the same verifier-teacher loss (0.1 CE + 0.9 TV),
 optimizer, schedule, batch (16 x 128 tokens), 10 epochs and data files, so only the architecture
 and the data change. The classic drafters are trained by `torch_train/finetune_distilgpt2.py`
 (next-token positions, no block weights; on generated rows only the predictions of generated
 tokens are scored; lr 2e-4, `DISTIL_LR`); its validation `tau_greedy[k-1]` is the classic
-drafter's mean tokens per verifier step with k drafts, the counterpart of the H-Spec drafter's.
+drafter's mean tokens per verifier step with k drafts, the counterpart of the H-Spec drafter's
+(both teacher-forced over every position, so both overestimate decoding; see below).
 Its `best/` (`save_pretrained`) loads directly in specdec: `python -m specdec.bench --draft-dir
 runs/distil-drafter-gen-s32/best --draft-label distil-gen ...`. The H-Spec cells reuse the two
 runs above (trained with the same settings, which `tests/model_tests/drafter/test_eval_sh.py`
@@ -167,19 +168,53 @@ checks). The stride-32 generated set has 74,745 rows against WikiText-2's 18.6k 
 the generated-data runs take ~4x as many steps in their 10 epochs.
 
 ```bash
-bash eval.sh                   # train what is missing, export, benchmark, summarize
+bash eval.sh                   # train what is missing, export, benchmark, summarize, plot
 STAGES=train bash eval.sh      # or split across allocations: train ...
 STAGES=bench bash eval.sh      # ... then benchmark (configs already in results/eval.jsonl are skipped)
 N_PROMPTS=20 TEMPS=1.0 bash eval.sh   # more prompts, plus sampling at temperature 1
 DRY_RUN=1 bash eval.sh         # print the commands
 ```
 
-The bench stage runs `ar_target`, `spec_k2..k5` for each classic drafter (and pretrained
-distilgpt2 as a no-fine-tuning reference, `REFERENCE=0` to skip) and `hspec_k3`, `hspec_k5`,
-`hspec` (k = 7) for each H-Spec drafter, on the same prompts, into `results/eval.jsonl` with
-labels `distilgpt2-pretrained`, `distil-wikitext`, `distil-gen`, `hspec-wikitext`, `hspec-gen`.
-`results/eval.md` (`specdec.summarize`) has the per-config table plus the fastest config per
-drafter.
+The bench stage runs `spec_k2..k5` for each classic drafter (and pretrained distilgpt2 as a
+no-fine-tuning reference, `REFERENCE=0` to skip) and `hspec_k3`, `hspec_k5`, `hspec` (k = 7) for
+each H-Spec drafter, on the same prompts, into `results/eval.jsonl` with labels
+`distilgpt2-pretrained`, `distil-wikitext`, `distil-gen`, `hspec-wikitext`, `hspec-gen`. Each
+bench run also times `ar_target` and stamps its rows with a `run_id`; speedups divide by the
+same run's `ar_target` (`specdec.summarize`), so a machine that changes speed between runs (another
+job, a different node after `STAGES` splits) cannot skew the comparison. `results/eval.md` has the
+per-config table plus the fastest config per drafter; `plot.py` draws `results/figures/`
+(speedup and τ vs k, the 2x2 ablation, acceptance by draft position, time per step, training
+curves, training estimate vs measured τ) and `ablation.md`.
+
+**First run** (`results/eval.jsonl`, 10 prompts, greedy, all outputs identical to the verifier's;
+figures in `results/figures/`). These rows predate `run_id`, and the timing check flags them: the
+verifier ran at 131-136 ms per call during `ar_target` and the three classic-drafter runs, but at
+102-106 ms during the two H-Spec runs (earlier files: 98-108 ms). The H-Spec speedups in
+`eval.md` (1.79x, 2.31x) divide by the slow baseline and are inflated by about 1.31x. τ does not
+depend on timing:
+
+| τ (tokens per verifier step) at k = 5 | WikiText-2 | verifier-generated |
+|---|---|---|
+| distilgpt2 (pretrained: 2.04) | 2.59 | 2.87 |
+| H-Spec | 1.83 | 2.37 |
+
+- Training on verifier-generated text helps both drafters and H-Spec far more (+0.54 vs +0.28).
+  The WikiText H-Spec drafter collapses after the second draft (P(draft j | draft j-1) = 0.51,
+  0.47, 0.31, 0.15, 0.00), so its τ is flat at 1.83 for k = 3, 5 and 7; the generated-data drafter
+  keeps 0.55-0.65 at every position.
+- The classic drafter accepts more at equal k (it conditions on its own drafts) but pays one
+  distilgpt2 forward per draft (31 ms here, vs 28 ms for a whole H-Spec block), so its best k is 2
+  while H-Spec's is 5.
+- Speedups within one timing regime: classic 1.18x (pretrained), 1.37x (WikiText), 1.41x
+  (generated), all at k = 2. Rescaling the H-Spec runs by the 1.31x verifier-call ratio gives
+  about 1.37x (WikiText, k = 3) and 1.77x (generated, k = 5); the earlier separate run of the
+  same generated-data drafter measured 1.68x. So on WikiText the two architectures tie, and on
+  verifier-generated text H-Spec is ahead. Re-run the bench (paired baselines) to confirm:
+  `RESULTS=results/eval_paired.jsonl SUMMARY=results/eval_paired.md FIGURES=results/figures_paired
+  STAGES=bench bash eval.sh`.
+- Training-time τ estimates overestimate decoding (distilgpt2, generated, k = 5: 3.82 vs 2.87;
+  H-Spec, generated, k = 7: 3.67 vs 2.41): they average over every start position, while decoding
+  starts each step right after a rejection, where disagreements cluster.
 
 ## Preliminary results (2026-11-03, V100-32GB, batch 1, fp32)
 

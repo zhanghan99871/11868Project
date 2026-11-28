@@ -1,5 +1,5 @@
 """eval.sh (the drafter ablation) and the bench/summarize options it uses: drafter labels,
---draft-dir, --skip-done and the fastest-config-per-drafter table."""
+--draft-dir, --skip-done, same-run ar_target baselines and the fastest-config-per-drafter table."""
 import io
 import json
 import os
@@ -21,16 +21,19 @@ from specdec import bench, summarize  # noqa: E402
 
 # --- bench and summarize -------------------------------------------------------------------------
 
-def row(config, draft, prompt, decode_time, tokens=(1, 2, 3), temperature=0.0, accepted=2, drafted=4, iterations=2):
+def row(config, draft, prompt, decode_time, tokens=(1, 2, 3), temperature=0.0, accepted=2, drafted=4, iterations=2,
+        verify_s=0.1):
+    """A bench row: 10 new tokens in `decode_time` s, `iterations` verifier calls of `verify_s` s each."""
     return {"config": config, "target": "mla-gpt2-medium", "draft": draft, "prompt": prompt,
             "temperature": temperature, "n_new": 10, "tokens": list(tokens), "total_time": decode_time + 0.1,
             "prefill_time": 0.1, "decode_time": decode_time, "target_calls": iterations, "draft_calls": iterations,
-            "target_time": decode_time * 0.8, "draft_time": decode_time * 0.2, "iterations": iterations,
+            "target_time": verify_s * iterations, "draft_time": decode_time * 0.2, "iterations": iterations,
             "drafted": drafted, "accepted": accepted, "accepted_per_iter": [1] * iterations}
 
 
 def write_rows(path, rows):
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return path
 
 
 def test_draft_labels():
@@ -52,6 +55,16 @@ def test_done_configs(tmp_path):
     done = bench.done_configs(str(path), 2)
     assert done == {("ar_target", "mla-gpt2-medium"), ("spec_k2", "mla-gpt2-medium", "distil-gen")}
     assert ("hspec", "mla-gpt2-medium", "hspec-gen") in bench.done_configs(str(path), 1)
+
+
+def test_todo_configs_retime_the_baseline():
+    done = {("ar_target", "t"), ("spec_k2", "t", "a"), ("hspec", "t", "h")}
+    assert bench.todo_configs(["ar_target", "spec_k2"], done, "t", "a", "h") == []
+    assert bench.todo_configs(["ar_target", "spec_k2", "spec_k3"], done, "t", "a", "h") == ["ar_target", "spec_k3"]
+    assert bench.todo_configs(["ar_target", "spec_k2"], done, "t", "b", "h") == ["ar_target", "spec_k2"]
+    assert bench.todo_configs(["ar_target", "hspec"], done, "t", "b", "h") == []  # hspec rows use the hspec label
+    assert bench.todo_configs(["ar_target"], set(), "t", "a", "h") == ["ar_target"]
+    assert bench.todo_configs(["micro", "spec_k2"], done, "t", "a", "h") == ["micro"]
 
 
 def test_skip_done_loads_nothing_when_everything_is_there(tmp_path, monkeypatch):
@@ -80,6 +93,57 @@ def test_bench_parser_and_dir_loading(tmp_path):
     assert (args.draft_dir, args.draft_label, args.hspec_label, args.skip_done) == ("runs/d/best", "d", "h", True)
     with pytest.raises(FileNotFoundError, match="model.safetensors"):
         bench.common.load_gpt2_dir(str(tmp_path))
+
+
+def test_speedups_use_the_same_run_baseline(tmp_path):
+    """Two bench runs on a machine whose speed changed in between: each speedup divides by its own
+    run's ar_target; without run ids the summary warns that speedups are not comparable."""
+    def run(rows, run_id):
+        return [{**r, "run_id": run_id} for r in rows]
+
+    slow = run([row("ar_target", "a", p, 2.0, iterations=10, verify_s=0.2) for p in range(2)]
+               + [row("spec_k2", "a", p, 1.6, verify_s=0.4) for p in range(2)], "slow")
+    fast = run([row("ar_target", "b", p, 1.5, iterations=10, verify_s=0.15) for p in range(2)]
+               + [row("hspec_k3", "b", p, 1.0, verify_s=0.3) for p in range(2)], "fast")  # machine 25% faster
+    rows, _ = summarize.load([str(write_rows(tmp_path / "paired.jsonl", slow + fast))])
+    ar = rows["ar_target"]
+    assert summarize.speedup(rows["spec_k2 [a]"], ar) == (pytest.approx(2.0 / 1.6), True)
+    assert summarize.speedup(rows["hspec_k3 [b]"], ar) == (pytest.approx(1.5 / 1.0), True)
+    assert summarize.timing_check(rows) is None  # paired: run-to-run speed changes do not matter
+
+    for r in slow + fast:
+        del r["run_id"]
+    write_rows(tmp_path / "unpaired.jsonl", slow + fast)
+    rows, _ = summarize.load([str(tmp_path / "unpaired.jsonl")])
+    sp, paired = summarize.speedup(rows["hspec_k3 [b]"], rows["ar_target"])
+    assert not paired and sp == pytest.approx((20 / 2.0) / (40 / 7.0))  # all four ar_target rows
+    warning = summarize.timing_check(rows)  # verifier calls: spec_k2 400 ms, hspec_k3 300 ms
+    assert warning and "not comparable" in warning
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        summarize.main([str(tmp_path / "unpaired.jsonl")])
+    assert "Warning: verifier ms per call differ" in buf.getvalue()
+
+
+def test_bench_rows_carry_the_run(tmp_path, monkeypatch):
+    """bench.main stamps every row with host and run_id (models replaced by a stub)."""
+    calls = []
+
+    def fake_run_config(cfg, *args, extra=None, **kwargs):
+        calls.append(extra)
+        return [{"config": cfg, "prompt": 0, **extra}]
+
+    monkeypatch.setattr(bench, "run_config", fake_run_config)
+    monkeypatch.setattr(bench.common, "load", lambda *a, **k: object())
+    monkeypatch.setattr(bench.common, "assert_no_torch", lambda: None)
+    monkeypatch.setattr(bench, "autoregressive", lambda *a, **k: None)
+    out = tmp_path / "rows.jsonl"
+    bench.main(["--target", "gpt2-medium", "--n-prompts", "1", "--out", str(out), "--configs", "ar_target"])
+    bench.main(["--target", "gpt2-medium", "--n-prompts", "1", "--out", str(out), "--configs", "ar_target"])
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    assert all(r["host"] and r["run_id"].startswith(r["host"]) for r in rows)
+    assert rows[0]["run_id"] != rows[1]["run_id"]  # even within one second
+    assert calls == [{k: r[k] for k in ("host", "run_id")} for r in rows]
 
 
 def test_summary_has_the_fastest_config_per_drafter(tmp_path):
@@ -151,7 +215,7 @@ def test_eval_sh_trains_four_matched_drafters(tmp_path):
     td.check_anchor_room(hspec_gen.anchors_per_seq, hspec_gen.seq_len, hspec_gen.block_size, gen.prompt_len - 1)
 
     # the H-Spec defaults reuse runs trained with exactly these settings (runs/*/arguments.json)
-    for args, run in ((hspec_wiki, "hspec-drafter-a64-lr6e-4-e10"), (hspec_gen, "hspec-drafter-gen-s32")):
+    for args, run in ((hspec_wiki, "hspec-drafter-wikitext"), (hspec_gen, "hspec-drafter-gen-s32")):
         saved = json.loads((ROOT / "runs" / run / "arguments.json").read_text())
         for key in ("init", "n_layer", "n_embd", "block_size", "n_taps", "seq_len", "batch_size", "anchors_per_seq",
                     "epochs", "lr", "weight_decay", "warmup_ratio", "clip_grad", "ce_weight", "tv_weight", "gamma",
@@ -173,9 +237,11 @@ def test_eval_sh_benchmarks_every_drafter_once(tmp_path):
     benches = [bench.parser().parse_args(c[3:]) for c in commands if c[:3] == ["python", "-m", "specdec.bench"]]
     assert all(b.target == "mla-gpt2-medium" and b.skip_done and b.n_prompts == 7 and b.out == str(tmp_path / "eval.jsonl")
                and (b.prompt_len, b.n_new) == (64, 64) for b in benches)
-    assert benches[0].configs == ["ar_target"]
-    classic = {b.draft_label: b for b in benches[1:] if b.configs[0].startswith("spec")}
-    hspec = {b.hspec_label: b for b in benches[1:] if b.configs[0].startswith("hspec")}
+    assert len(benches) == 5 and all(b.configs[0] == "ar_target" for b in benches)  # a same-run baseline each
+    for b in benches:
+        b.configs = b.configs[1:]
+    classic = {b.draft_label: b for b in benches if b.configs[0].startswith("spec")}
+    hspec = {b.hspec_label: b for b in benches if b.configs[0].startswith("hspec")}
     assert set(classic) == {"distilgpt2-pretrained", "distil-wikitext", "distil-gen"}
     assert set(hspec) == {"hspec-wikitext", "hspec-gen"}
     assert classic["distilgpt2-pretrained"].draft == "distilgpt2" and classic["distilgpt2-pretrained"].draft_dir is None
@@ -189,7 +255,22 @@ def test_eval_sh_benchmarks_every_drafter_once(tmp_path):
     for b in hspec.values():
         assert b.configs == ["hspec_k3", "hspec_k3_t1.0", "hspec_k5", "hspec_k5_t1.0", "hspec", "hspec_t1.0"]
     assert all(bench.is_config(c) for b in benches for c in b.configs)
-    assert commands[-1] == ["python", "-m", "specdec.summarize", str(tmp_path / "eval.jsonl")]
+    assert commands[-2] == ["python", "-m", "specdec.summarize", str(tmp_path / "eval.jsonl")]
+    import plot
+    figures = plot.arguments(commands[-1][2:])
+    assert commands[-1][1] == "plot.py" and figures.results == [str(tmp_path / "eval.jsonl")]
+    assert figures.out == "results/figures"
+    assert {label: figures.runs[label] for label in plot.RUNS} == {
+        "distil-wikitext": paths["DISTIL_WIKI"], "distil-gen": paths["DISTIL_GEN"],
+        "hspec-wikitext": paths["HSPEC_WIKI"], "hspec-gen": paths["HSPEC_GEN"]}
+
+
+def test_plot_runs_are_eval_sh_defaults():
+    import plot
+    text = (ROOT / "eval.sh").read_text()
+    for var, label in (("DISTIL_WIKI", "distil-wikitext"), ("DISTIL_GEN", "distil-gen"),
+                       ("HSPEC_WIKI", "hspec-wikitext"), ("HSPEC_GEN", "hspec-gen")):
+        assert f"{var}=${{{var}:-{plot.RUNS[label]}}}" in text
 
 
 def test_eval_sh_reuses_finished_runs_and_stages(tmp_path):
@@ -200,7 +281,7 @@ def test_eval_sh_reuses_finished_runs_and_stages(tmp_path):
     commands, paths = dry_run(tmp_path)
     scripts = [c[1] for c in commands if c[0] == "python" and c[1] != "-m"]
     assert scripts == ["torch_train/finetune_distilgpt2.py", "torch_train/train_drafter.py",
-                       "torch_train/export_hspec_drafter.py"]
+                       "torch_train/export_hspec_drafter.py", "plot.py"]
     assert fd.arguments(by_script(commands, "torch_train/finetune_distilgpt2.py")[0][2:]).output_dir == paths["DISTIL_GEN"]
     assert td.arguments(by_script(commands, "torch_train/train_drafter.py")[0][2:]).output_dir == paths["HSPEC_WIKI"]
 

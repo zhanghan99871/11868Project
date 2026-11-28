@@ -29,3 +29,5 @@ Fastest config per drafter:
 | distil-gen | 0 | spec_k2 | 11.04 | 1.41x | 0.583 | 2.14 | 10/10 |
 | distil-wikitext | 0 | spec_k2 | 10.69 | 1.37x | 0.547 | 2.07 | 10/10 |
 | distilgpt2-pretrained | 0 | spec_k2 | 9.27 | 1.18x | 0.402 | 1.79 | 10/10 |
+
+Warning: verifier ms per call differ across bench runs (ar_target 131, distilgpt2-pretrained 133, distil-wikitext 133, distil-gen 133, hspec-wikitext 104, hspec-gen 103; distil-gen is 1.29x hspec-gen) and some speedups have no same-run ar_target baseline: speedups from different runs are not comparable (re-run them with a paired ar_target; acceptance and tokens/iter are unaffected).

@@ -1,3 +1,14 @@
+Memory (bench `memory`: GPU/host bytes measured around loading each model):
+
+| model | role | parameters | measured GPU (MB) | measured host (MB) | cache per token | cache allocated (MB) | reads verifier head |
+|---|---|---|---|---|---|---|---|
+| mla-gpt2-medium | verifier | 355.6M | 1302 | 1638 | 51.0 KB | 51 | - |
+| distilgpt2-pretrained | drafter | 81.9M | 340 | 643 | 36.0 KB | 36 | - |
+| distil-wikitext | drafter | 81.9M | 340 | 612 | 36.0 KB | 36 | - |
+| distil-gen | drafter | 81.9M | 340 | 612 | 36.0 KB | 36 | - |
+| hspec-wikitext | drafter | 95.2M | 220 | 546 | 0.0 KB | 0 | yes |
+| hspec-gen | drafter | 95.2M | 220 | 546 | 0.0 KB | 0 | yes |
+
 | config | prompts | decode tok/s | speedup vs target AR | acceptance | tokens/iter | draft time share | identical to target greedy |
 |---|---|---|---|---|---|---|---|
 | ar_target | 10 | 7.83 | 1.00x | - | 1.00 | - | - |
